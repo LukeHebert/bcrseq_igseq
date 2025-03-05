@@ -9,3 +9,5 @@
 - Add a VH-VL pair-picking script to help mAb selection & downstream expression
 
 - Add EMPEM data integration scripts?
+
+- Integrate all scripts into a cohesive, user-friendly, bonafide pipeline with a tool like e.g. snakemake
