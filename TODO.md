@@ -1,3 +1,5 @@
+- Remove all absolute pathways and replace with user arguments to the corresponding software
+
 - Update README.md to guide users through a "pipeline" run.
 
 - Create (or at least update old) generally useful plotting scripts
@@ -11,3 +13,5 @@
 - Add EMPEM data integration scripts?
 
 - Integrate all scripts into a cohesive, user-friendly, bonafide pipeline with a tool like e.g. snakemake
+
+- Include all dependencies in a container or similar
