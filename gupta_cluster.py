@@ -17,6 +17,7 @@ PMC5340603.
 Use `python gupta_cluster.py --help` for instructions
 """
 
+
 import argparse
 import os
 import pandas as pd
@@ -25,7 +26,6 @@ from datetime import datetime
 from scipy.cluster.hierarchy import linkage, fcluster
 from scipy.spatial.distance import pdist
 from scipy.stats import gaussian_kde
-from scipy.signal import find_peaks
 import matplotlib.pyplot as plt
 
 def parse_arguments():
@@ -78,25 +78,19 @@ def cluster_group(seqs, threshold):
     Given a list of CDRH3 amino acid sequences (all the same length),
     compute the pairwise Hamming distance matrix, perform single-linkage clustering,
     and return an array of cluster labels.
+    
+    The error previously encountered (a 1D array) is fixed by converting each
+    sequence into a list of characters to form a 2D array.
     """
     if len(seqs) == 0:
         return np.array([], dtype=int)
     if len(seqs) == 1:
         return np.array([1], dtype=int)
     
-    # Convert each sequence (string) to a list of its characters.
-    # This results in a 2D numpy array with shape (number_of_sequences, sequence_length)
+    # Convert each sequence string to a list of characters to obtain a 2D array.
     arr = np.array([list(seq) for seq in seqs])
-    
-    # Use pdist with a custom lambda function to compute the pairwise Hamming distance.
-    # The lambda function receives two 1D arrays (each representing a sequence as a list of characters)
-    # and computes the Hamming distance after joining them back to strings.
     distances = pdist(arr, lambda u, v: hamming_distance(''.join(u), ''.join(v)))
-    
-    # Perform single-linkage hierarchical clustering on the distance matrix.
     Z = linkage(distances, method='single')
-    
-    # Form flat clusters with the given threshold (max number of mismatches allowed).
     clusters = fcluster(Z, t=threshold, criterion='distance')
     return clusters
 
@@ -107,9 +101,11 @@ def compute_auto_threshold(df, clustering_dir, log_file):
     
     For each group (defined by same V gene, J gene, and CDRH3 amino acid length)
     with at least two sequences, compute the minimum (nearest neighbor) Hamming distance.
-    Pool these distances, estimate a kernel density (KDE), and choose the threshold
-    as the valley between the first two peaks. Also save a PNG visualization
-    of the KDE with detected peaks and the selected threshold.
+    Pool these distances, estimate a kernel density (KDE) using a Gaussian kernel,
+    then compute the first and second derivatives of the KDE.
+    The threshold is selected as the first grid point after the main peak where the first derivative
+    changes from negative to positive (indicating a local minimum) and the second derivative is positive.
+    A PNG visualization (dpi=600) is saved to the 'clustering/' subdirectory.
     """
     distances = []
     groups = df.groupby(['v_gene', 'j_gene', 'cdr3_aa_length'])
@@ -119,7 +115,6 @@ def compute_auto_threshold(df, clustering_dir, log_file):
         seqs = group['cdr3_aa'].tolist()
         n = len(seqs)
         for i in range(n):
-            # Compute Hamming distances to all other sequences in the group.
             dists = [hamming_distance(seqs[i], seqs[j]) for j in range(n) if j != i]
             if dists:
                 distances.append(min(dists))
@@ -128,36 +123,42 @@ def compute_auto_threshold(df, clustering_dir, log_file):
         log_file.write("No groups with >=2 sequences found; using default threshold of 2.\n")
         return 2
 
-    # Compute a kernel density estimate (KDE) over the distances.
+    # Estimate the density using Gaussian KDE.
     kde = gaussian_kde(distances)
     grid = np.linspace(distances.min(), distances.max(), 1000)
     kde_vals = kde(grid)
     
-    # Identify peaks in the KDE.
-    peaks, _ = find_peaks(kde_vals)
-    if len(peaks) < 2:
-        auto_thresh = int(np.round(np.median(distances)))
-        log_file.write(f"Less than two peaks found; using median threshold {auto_thresh}.\n")
-    else:
-        first_peak = peaks[0]
-        second_peak = peaks[1]
-        # The valley is the grid point with the minimum density between the first two peaks.
-        # These peaks should belong to fellow B cell lineage members & non-members
-        valley_index = np.argmin(kde_vals[first_peak:second_peak]) + first_peak
-        auto_thresh = grid[valley_index]
-        auto_thresh = int(np.round(auto_thresh))
-        log_file.write(f"Automatically determined threshold based on distance-to-nearest: {auto_thresh} mismatches.\n")
+    # Compute first and second derivatives of the KDE.
+    d1 = np.gradient(kde_vals, grid)
+    d2 = np.gradient(d1, grid)
     
-    # Plot the KDE and mark the detected peaks and threshold.
+    # Identify the index of the main peak (the maximum of the KDE).
+    main_peak_idx = np.argmax(kde_vals)
+    
+    # Find the first index after the main peak where the first derivative changes from negative to positive 
+    # and the second derivative is positive.
+    candidate_idx = None
+    for i in range(main_peak_idx + 1, len(grid)):
+        if d1[i-1] < 0 and d1[i] >= 0 and d2[i] > 0:
+            candidate_idx = i
+            break
+    if candidate_idx is None:
+        # If no candidate is found, default to the median.
+        auto_thresh = int(np.round(np.median(distances)))
+        log_file.write(f"No clear valley found; using median threshold {auto_thresh}.\n")
+    else:
+        auto_thresh = grid[candidate_idx]
+        auto_thresh = int(np.round(auto_thresh))
+        log_file.write(f"Automatically determined threshold based on derivatives: {auto_thresh} mismatches.\n")
+    
+    # Plot KDE along with its first derivative zero crossing and the selected threshold.
     plt.figure(figsize=(8, 6))
     plt.plot(grid, kde_vals, label='KDE of distances')
+    plt.axvline(x=grid[main_peak_idx], color='green', linestyle=':', label='Main peak')
+    plt.axvline(x=auto_thresh, color='red', linestyle='--', label=f"Threshold = {auto_thresh}")
     plt.xlabel("Nearest neighbor Hamming distance")
     plt.ylabel("Density")
-    plt.title("Distance-to-Nearest Distribution")
-    if len(peaks) > 0:
-        plt.plot(grid[peaks], kde_vals[peaks], "x", label="Peaks")
-    if len(peaks) >= 2:
-        plt.axvline(x=auto_thresh, color='red', linestyle='--', label=f"Threshold = {auto_thresh}")
+    plt.title("Distance-to-Nearest Distribution with Threshold")
     plt.legend()
     png_filename = os.path.join(clustering_dir, "distance_to_nearest.png")
     plt.savefig(png_filename, dpi=600, bbox_inches='tight')
@@ -170,6 +171,9 @@ def perform_clustering(df, threshold, log_file):
     Group the DataFrame by V gene, J gene, and CDRH3 amino acid length,
     perform hierarchical clustering within each group using the specified threshold,
     and return the DataFrame with an added 'ClusterID' column.
+    
+    It is assumed that the DataFrame already contains 'v_gene', 'j_gene',
+    and 'cdr3_aa_length' columns.
     """
     groups = df.groupby(['v_gene', 'j_gene', 'cdr3_aa_length'])
     log_file.write(f"Number of groups to cluster: {len(groups)}\n")
@@ -181,7 +185,6 @@ def perform_clustering(df, threshold, log_file):
         indices = group.index
         seqs = group['cdr3_aa'].tolist()
         clusters = cluster_group(seqs, threshold)
-        # Assign global cluster IDs by offsetting with global_cluster_id.
         clusters_global = clusters + global_cluster_id - 1
         df.loc[indices, 'ClusterID'] = clusters_global
         global_cluster_id += clusters.max()
@@ -205,7 +208,7 @@ def main():
         df['j_gene'] = df['j_call'].apply(extract_gene)
         df['cdr3_aa_length'] = df['cdr3_aa'].apply(lambda x: len(x) if pd.notnull(x) else 0)
         
-        # Determine threshold: either automatically or use user-specified value.
+        # Determine threshold.
         if args.auto_threshold:
             threshold = compute_auto_threshold(df, clustering_dir, log_file)
         elif args.threshold is not None:
@@ -215,7 +218,7 @@ def main():
             threshold = 2
             log_file.write("No threshold specified; defaulting to 2 mismatches.\n")
         
-        # Perform clustering on the DataFrame.
+        # Perform clustering.
         clustered_df = perform_clustering(df, threshold, log_file)
         clustered_df = clustered_df.sort_values(by=['ClusterID'], ascending=True)
         
