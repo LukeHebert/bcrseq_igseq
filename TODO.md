@@ -14,6 +14,8 @@
 
 - Add EMPEM data integration scripts?
 
+- Add a filter for chimeric PCR products early on in the workflow using e.g. "CHMMAIRRa" (PMID: 40060431 doi: 10.1101/2025.02.21.638809)
+
 ## Less Important
 
 - Integrate all scripts into a cohesive, user-friendly, bonafide pipeline with a tool like e.g. snakemake
