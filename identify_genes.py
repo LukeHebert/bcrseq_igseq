@@ -102,6 +102,7 @@ def call_igblast(infile, species, log_file_name, output_dir):
     
     # If input is FASTQ, convert to FASTA and save the converted file to output_dir.
     # If already FASTA, use as is.
+    infile = os.path.abspath(infile) #Avoids a `cd`-related error later
     if infile.lower().endswith(('.fastq', '.fq')):
         print('\tConverting .fastq to .fasta...')
         base = os.path.basename(infile)
