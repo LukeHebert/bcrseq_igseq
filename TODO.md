@@ -20,6 +20,10 @@
 
 ## Less Important
 
+- Add a caveat in the README.md that says these scripts have been tested primarily on ferret input (for humans e.g. you will need to add C gene database to your IMGT reference datadata files)
+
+- Add a little route in the diagram PNG that shows light chain data needs to skip the clustering step
+
 - Integrate all scripts into a cohesive, user-friendly, bonafide pipeline with a tool like e.g. snakemake
 
 - Include all dependencies in a container or similar
