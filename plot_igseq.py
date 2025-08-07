@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 """
-This script processes an antibody mass spectroscopy TSV file merged with BCR-seq
-transcript data and produces bar plots showing the relative abundance of B cell
-lineages (by ClusterID for heavy chain) and gene usage (v_call and j_call) for 
-heavy, kappa, and light chain subsets.
+Process one or more antibody-mass-spec TSVs merged with BCR-seq to produce
+either clustered bar plots (by file) or clustered boxplots (by user-defined groups)
+for:
+  - Heavy-chain lineage by rank (clonal families)
+  - Gene usage (v_call, j_call) across heavy, kappa, light chains
 
-A companion TSV is generated for each plot, containing the actual X tick labels
-(one column) and the corresponding Y axis values (another column).
- 
-Use `python plot_igseq.py --help` for instructions.
+Usage:
+  # Bar plots by file:
+  python plot_igseq.py --input_files a.tsv b.tsv … [--split_names] [--max_cf N] [--max_v N] [--max_j M]
+
+  # Boxplots by group:
+  python plot_igseq.py \
+    --groups Group1:a1.tsv,a2.tsv Group2:b1.tsv … \
+    [--max_cf N] [--max_v N] [--max_j M]
 """
-
 import os
 import sys
 import argparse
@@ -21,237 +25,290 @@ import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 
-def create_output_dir(input_file):
-    """Create a new 'plot_igseq' directory in the parent directory of the input file."""
-    parent_dir = os.path.dirname(os.path.abspath(input_file))
-    output_dir = os.path.join(parent_dir, "plot_igseq")
-    os.makedirs(output_dir, exist_ok=True)
-    return output_dir
+def create_output_dir(first_input):
+    """Create a single 'plot_igseq' directory next to the first input file."""
+    parent = os.path.dirname(os.path.abspath(first_input))
+    out = os.path.join(parent, "plot_igseq")
+    os.makedirs(out, exist_ok=True)
+    return out
 
 def setup_logging(output_dir, cmd):
-    """Setup logging with a timestamped log file in the output directory."""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_filename = os.path.join(output_dir, f"log_{timestamp}.txt")
+    """Timestamped log file in output_dir recording the command and outputs."""
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    logf = os.path.join(output_dir, f"log_{ts}.txt")
     logging.basicConfig(
-        filename=log_filename,
+        filename=logf,
         level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s'
+        format="%(asctime)s - %(levelname)s - %(message)s"
     )
-    logging.info("Command executed: " + " ".join(cmd))
-    logging.info("Output files will be saved in: " + output_dir)
-    return log_filename
-
-def load_data(tsv_file):
-    """Load the TSV file into a pandas DataFrame."""
-    df = pd.read_csv(tsv_file, sep="\t")
-    logging.info(f"Loaded {len(df)} rows from {tsv_file}")
-    return df
+    logging.info("Command: " + " ".join(cmd))
+    logging.info("Output dir: " + output_dir)
+    return logf
 
 def split_chains(df):
     """
-    Split the data into heavy, kappa, lambda, and combined light chain subsets
-    by searching the v_call column for IGHV, IGKV, and IGLV substrings.
+    Split on v_call into heavy (IGHV), kappa (IGKV), lambda (IGLV),
+    plus combined light = kappa+lambda.
     """
-    heavy_df = df[df['v_call'].str.contains("IGHV", na=False)]
-    kappa_df = df[df['v_call'].str.contains("IGKV", na=False)]
-    lambda_df = df[df['v_call'].str.contains("IGLV", na=False)]
-    light_df = pd.concat([kappa_df, lambda_df])
+    hv = df[df['v_call'].str.contains("IGHV", na=False)]
+    kp = df[df['v_call'].str.contains("IGKV", na=False)]
+    lv = df[df['v_call'].str.contains("IGLV", na=False)]
+    lt = pd.concat([kp, lv], ignore_index=True)
     logging.info(
-        f"Heavy chain rows: {len(heavy_df)}; "
-        f"Kappa chain rows: {len(kappa_df)}; "
-        f"Lambda chain rows: {len(lambda_df)}; "
-        f"Combined light chain rows: {len(light_df)}"
+        f"Chains: heavy={len(hv)}, kappa={len(kp)}, "
+        f"lambda={len(lv)}, light={len(lt)}"
     )
-    return heavy_df, kappa_df, lambda_df, light_df
+    return hv, kp, lv, lt
 
-def plot_heavy_cluster(heavy_df, output_dir):
-    """Generate the heavy chain ClusterID bar plot and companion files."""
-    # Filter heavy chain rows with cdr3_coverage_percentage > 0
-    heavy_filtered = heavy_df[heavy_df['cdr3_coverage_percentage'] > 0]
-    if heavy_filtered.empty:
-        logging.info("No heavy chain rows with cdr3_coverage_percentage > 0; skipping heavy cluster plot.")
-        return
+def gather_heavy_lineages(label, df):
+    """Compute percent_abundance by ClusterID→ranked for one label (file or group member)."""
+    sub = df[df['cdr3_coverage_percentage'] > 0]
+    grp = (sub.groupby("ClusterID")["Precursor Abundance"]
+              .sum().reset_index(name="abundance"))
+    tot = grp["abundance"].sum()
+    grp["percent_abundance"] = grp["abundance"] / tot * 100
+    grp = grp.sort_values("percent_abundance", ascending=False).reset_index(drop=True)
+    grp["rank"] = grp.index + 1
+    return grp[["rank", "percent_abundance"]].assign(label=label)
 
-    # Group by ClusterID and sum Precursor Abundance
-    cluster_group = heavy_filtered.groupby("ClusterID")["Precursor Abundance"].sum().reset_index()
-    total_cluster_abundance = cluster_group["Precursor Abundance"].sum()
-    # Calculate percent abundance for each ClusterID
-    cluster_group["percent_abundance"] = (
-        cluster_group["Precursor Abundance"] / total_cluster_abundance
-    ) * 100
-
-    # Order the data by percent_abundance descending
-    cluster_group = cluster_group.sort_values(by="percent_abundance", ascending=False)
-
-    # Create bar plot using seaborn with ordered x-axis and vertical labels
-    plt.figure(figsize=(10, 6))
-    sns.barplot(
-        x="ClusterID",
-        y="percent_abundance",
-        data=cluster_group,
-        order=cluster_group["ClusterID"].tolist()
+def gather_gene_usage(label, df, gene_col):
+    """Compute percent_abundance by gene_call (first allele) for one label."""
+    d = df.copy()
+    d[gene_col] = d[gene_col].apply(
+        lambda x: x.split(",")[0].strip() if isinstance(x, str) else x
     )
-    plt.ylabel("Percent Abundance")
-    plt.title("Relative Abundance of B cell lineages (Heavy chain by ClusterID)")
+    d = d[d[gene_col].notna() & (d[gene_col] != "")]
+    grp = (d.groupby(gene_col)["Precursor Abundance"]
+            .sum().reset_index(name="abundance"))
+    tot = grp["abundance"].sum()
+    grp["percent_abundance"] = grp["abundance"] / tot * 100
+    return grp[[gene_col, "percent_abundance"]] \
+              .rename(columns={gene_col:"gene_call"}) \
+              .assign(label=label)
+
+def parse_groups(group_args):
+    """
+    Parse --groups of the form Name:file1.tsv,file2.tsv ...
+    Returns dict name→[filepaths]. Allows even single-file groups.
+    """
+    groups = {}
+    for g in group_args:
+        if ":" not in g:
+            raise ValueError(f"Invalid group spec: {g}")
+        name, files = g.split(":",1)
+        flist = files.split(",")
+        groups[name] = flist
+    if len(groups) < 2:
+        raise ValueError("Must specify ≥2 groups for boxplots")
+    return groups
+
+def plot_bar(df, x, y, hue, order, xlabel, ylabel, title, out_png, out_tsv, split_names):
+    """Clustered bar plot by file."""
+    if split_names:
+        df[hue] = df[hue].apply(
+            lambda f: os.path.splitext(os.path.basename(f))[0].split("_")[0]
+        )
+    plt.figure(figsize=(10,6))
+    sns.barplot(data=df, x=x, y=y, hue=hue, palette="colorblind", order=order)
+    plt.title(title); plt.xlabel(xlabel); plt.ylabel(ylabel)
     plt.xticks(rotation=90)
-    heavy_cluster_plot_file = os.path.join(output_dir, "heavy_cluster_plot.png")
+    plt.legend(title="File", bbox_to_anchor=(1.02,1), loc="upper left")
     plt.tight_layout()
-    plt.savefig(heavy_cluster_plot_file, dpi=600)
-    plt.close()
-    logging.info("Saved heavy chain cluster plot to " + heavy_cluster_plot_file)
+    plt.savefig(out_png, dpi=600); plt.close()
+    df[[x,hue,y]].to_csv(out_tsv, sep="\t", index=False)
+    logging.info(f"Wrote {out_png} + {out_tsv}")
 
-    # Save the aggregated data (x-axis & y-axis) as a companion TSV
-    heavy_cluster_plot_data = cluster_group[["ClusterID", "percent_abundance"]]
-    heavy_cluster_plot_data_file = os.path.join(output_dir, "heavy_cluster_plot_data.tsv")
-    heavy_cluster_plot_data.to_csv(heavy_cluster_plot_data_file, sep="\t", index=False)
-    logging.info("Saved heavy chain cluster plot data to " + heavy_cluster_plot_data_file)
+def plot_box(df, x, y, hue, order, xlabel, ylabel, title, out_png, out_tsv):
+    """Clustered box‐and‐whisker plot by group, overlaid with points so single‐value groups show color."""
+    # Colorblind palette; blue‐ish & orange‐ish for first two groups, etc.
+    pal = sns.color_palette("colorblind", n_colors=df[hue].nunique())
 
-    # Save companion TSV file with the filtered heavy chain data used for grouping
-    heavy_cluster_tsv = os.path.join(output_dir, "heavy_cluster_data.tsv")
-    heavy_filtered.to_csv(heavy_cluster_tsv, sep="\t", index=False)
-    logging.info("Saved heavy chain filtered data TSV to " + heavy_cluster_tsv)
-
-    # Write companion TXT file with stats
-    total_heavy_abundance = heavy_df["Precursor Abundance"].sum()
-    abundance_ratio = (
-        (total_cluster_abundance / total_heavy_abundance) * 100
-        if total_heavy_abundance > 0
-        else 0
+    plt.figure(figsize=(10,6))
+    ax = sns.boxplot(
+        data=df, x=x, y=y, hue=hue,
+        palette=pal, order=order
+    )
+    # overlay the actual points
+    sns.stripplot(
+        data=df, x=x, y=y, hue=hue,
+        palette=pal, dodge=True,
+        size=6, edgecolor="gray", linewidth=0.5,
+        ax=ax, legend=False
     )
 
-    n_total = len(heavy_df)
-    n_filtered = len(heavy_filtered)
-    peptide_ratio = (n_filtered / n_total * 100) if n_total > 0 else 0
-
-    heavy_stats_file = os.path.join(output_dir, "heavy_cluster_stats.txt")
-    with open(heavy_stats_file, "w") as f:
-        f.write("Heavy Chain ClusterID Plot Statistics\n")
-        f.write("---------------------------------------\n")
-        f.write(
-            f"Total Precursor Abundance in filtered heavy chain (cdr3_coverage_percentage > 0): {total_cluster_abundance}\n"
-        )
-        f.write(
-            f"Total Precursor Abundance in entire heavy chain dataset: {total_heavy_abundance}\n"
-        )
-        f.write(
-            f"Percentage of filtered total vs. entire heavy chain: {abundance_ratio:.2f}%\n\n"
-        )
-        f.write(f"Number of peptides with cdr3_coverage_percentage > 0: {n_filtered}\n")
-        f.write(f"Total number of peptides in heavy chain dataset: {n_total}\n")
-        f.write(f"Percentage of peptides used: {peptide_ratio:.2f}%\n")
-    logging.info("Saved heavy chain cluster stats to " + heavy_stats_file)
-
-def plot_gene_usage(chain_name, chain_df, gene_col, output_dir):
-    """Generate a gene usage bar plot and companion stats file for a given chain and gene column."""
-    # Make a copy to avoid modifying the original DF
-    chain_df = chain_df.copy()
-
-    # Process the gene column: split on comma and take the first element
-    chain_df[gene_col] = chain_df[gene_col].apply(
-        lambda x: x.split(',')[0].strip() if isinstance(x, str) else x
-    )
-
-    # Filter rows where the gene column is not empty or null
-    gene_df = chain_df[chain_df[gene_col].notnull() & (chain_df[gene_col] != "")]
-    if gene_df.empty:
-        logging.info(f"No rows with non-empty {gene_col} for {chain_name} chain; skipping {gene_col} plot.")
-        return
-
-    # Group by the gene column and sum Precursor Abundance
-    gene_group = gene_df.groupby(gene_col)["Precursor Abundance"].sum().reset_index()
-    total_gene_abundance = gene_group["Precursor Abundance"].sum()
-    gene_group["percent_abundance"] = (
-        gene_group["Precursor Abundance"] / total_gene_abundance
-    ) * 100
-
-    # Order the data by percent_abundance descending
-    gene_group = gene_group.sort_values(by="percent_abundance", ascending=False)
-
-    # Create bar plot using seaborn with ordered x-axis and vertical labels
-    plt.figure(figsize=(10, 6))
-    sns.barplot(
-        x=gene_col,
-        y="percent_abundance",
-        data=gene_group,
-        order=gene_group[gene_col].tolist()
-    )
-    plt.ylabel("Percent Abundance")
-    plt.title(f"Relative Abundance by {gene_col} for {chain_name} chain")
+    plt.title(title)
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
     plt.xticks(rotation=90)
-    plot_filename = os.path.join(output_dir, f"{chain_name}_{gene_col}_plot.png")
+    # only one legend (from boxplot)
+    plt.legend(title="Group", bbox_to_anchor=(1.02,1), loc="upper left")
     plt.tight_layout()
-    plt.savefig(plot_filename, dpi=600)
+    plt.savefig(out_png, dpi=600)
     plt.close()
-    logging.info(f"Saved {chain_name} {gene_col} plot to " + plot_filename)
 
-    # Save the aggregated data (x-axis & y-axis) as a companion TSV
-    plot_data = gene_group[[gene_col, "percent_abundance"]]
-    plot_data_file = os.path.join(output_dir, f"{chain_name}_{gene_col}_plot_data.tsv")
-    plot_data.to_csv(plot_data_file, sep="\t", index=False)
-    logging.info(f"Saved {chain_name} {gene_col} plot data to " + plot_data_file)
+    # companion TSV
+    df[[x, hue, y]].to_csv(out_tsv, sep="\t", index=False)
+    logging.info(f"Wrote {out_png} + {out_tsv}")
 
-    # Write companion TXT file with statistics
-    total_peptides = len(chain_df)
-    peptides_used = len(gene_df)
-    peptide_percentage = (peptides_used / total_peptides * 100) if total_peptides > 0 else 0
-    chain_total_abundance = chain_df["Precursor Abundance"].sum()
-    abundance_percentage = (
-        total_gene_abundance / chain_total_abundance * 100
-        if chain_total_abundance > 0
-        else 0
-    )
-
-    stats_filename = os.path.join(output_dir, f"{chain_name}_{gene_col}_stats.txt")
-    with open(stats_filename, "w") as f:
-        f.write(f"{chain_name.capitalize()} Chain {gene_col.upper()} Plot Statistics\n")
-        f.write("----------------------------------------\n")
-        f.write(f"Total peptides for {chain_name} chain: {total_peptides}\n")
-        f.write(f"Peptides used for {gene_col} plot: {peptides_used} ({peptide_percentage:.2f}%)\n")
-        f.write(f"Total Precursor Abundance for plotted subset: {total_gene_abundance}\n")
-        f.write(f"Total Precursor Abundance for {chain_name} chain: {chain_total_abundance}\n")
-        f.write(f"Percentage of plotted subset's Precursor Abundance: {abundance_percentage:.2f}%\n")
-    logging.info(f"Saved {chain_name} {gene_col} stats to " + stats_filename)
 
 def main():
-    """Main function to parse arguments and run the plotting procedures."""
-    parser = argparse.ArgumentParser(
-        description="Plot relative quantities of B cell lineages and gene usage from antibody mass spec data merged with BCR-seq data."
+    p = argparse.ArgumentParser(
+        description="Clustered barplots or boxplots of heavy lineage & gene usage"
     )
-    parser.add_argument("--input_file", required=True,
-                        help="Path to input TSV file containing antibody mass spec and BCR-seq data.")
-    args = parser.parse_args()
+    p.add_argument("--input_files", nargs="*", help="TSV files (bar mode)")
+    p.add_argument(
+        "--groups", nargs="*", metavar="Name:f1,f2,…",
+        help="Groups for boxplot mode: Name:file1.tsv,… (≥2 groups)"
+    )
+    p.add_argument(
+        "--split_names", action="store_true",
+        help="In bar mode, abbreviate file labels by splitting on '_'"
+    )
+    p.add_argument("--max_cf", type=int, default=None,
+                   help="Max number of clonal families (lineage ranks) to plot")
+    p.add_argument("--max_v", type=int, default=None, help="Max v_call genes to plot")
+    p.add_argument("--max_j", type=int, default=None, help="Max j_call genes to plot")
+    args = p.parse_args()
 
-    # Create output directory and set up logging
-    output_dir = create_output_dir(args.input_file)
-    setup_logging(output_dir, sys.argv)
-
-    # Load data
-    df = load_data(args.input_file)
-
-    # Split into heavy, kappa, lambda, and light chain subsets (using v_call)
-    heavy_df, kappa_df, lambda_df, light_df = split_chains(df)
-
-    # Generate heavy chain ClusterID plot (if heavy_df is non-empty)
-    if not heavy_df.empty:
-        plot_heavy_cluster(heavy_df, output_dir)
+    # Choose mode
+    if args.groups:
+        groups = parse_groups(args.groups)
+        all_files = [f for fl in groups.values() for f in fl]
+        bar_mode = False
     else:
-        logging.info("No heavy chain data available; skipping heavy cluster plot.")
+        if not args.input_files:
+            p.error("Provide either --input_files (bar mode) or --groups (box mode)")
+        all_files = args.input_files
+        groups = None
+        bar_mode = True
 
-    # For gene usage plots, we handle heavy, kappa, and light chain subsets separately.
-    # Now using 'v_call' and 'j_call' instead of 'v_gene' and 'j_gene'.
-    chain_dict = {
-        "heavy": heavy_df,
-        "kappa": kappa_df,
-        "light": light_df
-    }
-    for chain_name, chain_df in chain_dict.items():
-        if chain_df.empty:
-            logging.info(f"No {chain_name} chain data available; skipping gene usage plots for {chain_name}.")
-            continue
-        # v_call plot
-        plot_gene_usage(chain_name, chain_df, "v_call", output_dir)
-        # j_call plot
-        plot_gene_usage(chain_name, chain_df, "j_call", output_dir)
+    outdir = create_output_dir(all_files[0])
+    setup_logging(outdir, sys.argv)
+
+    # Collect
+    lineage_dfs = []
+    gene_dfs = { gc:{ch:[] for ch in ('heavy','kappa','light')} for gc in ('v_call','j_call') }
+
+    # In box mode we’ll gather per-file then re-label as group below
+    for f in all_files:
+        df = pd.read_csv(f, sep="\t")
+        hv, kp, lv, lt = split_chains(df)
+
+        if bar_mode:
+            lineage_dfs.append(gather_heavy_lineages(f, hv))
+            for chain, sub in (('heavy',hv),('kappa',kp),('light',lt)):
+                for gc in ('v_call','j_call'):
+                    gene_dfs[gc][chain].append(gather_gene_usage(f, sub, gc))
+        else:
+            # still gather per-file for grouping
+            lineage_dfs.append(gather_heavy_lineages(f, hv).assign(file=f))
+            for chain,sub in (('heavy',hv),('kappa',kp),('light',lt)):
+                for gc in ('v_call','j_call'):
+                    gene_dfs[gc][chain].append(
+                        gather_gene_usage(f, sub, gc).assign(file=f)
+                    )
+
+    # ==== BAR MODE ====
+    if bar_mode:
+        # --- Heavy lineage bar ---
+        all_lin = pd.concat(lineage_dfs, ignore_index=True)
+        # enforce full (file,rank) grid
+        files = all_lin['label'].unique()
+        ranks = sorted(all_lin['rank'].unique())
+        if args.max_cf:
+            ranks = ranks[:args.max_cf]
+            all_lin = all_lin[all_lin['rank'].isin(ranks)]
+        idx = pd.MultiIndex.from_product([files, ranks], names=['label','rank'])
+        all_lin = (all_lin.set_index(['label','rank'])
+                         .reindex(idx, fill_value=0)
+                         .reset_index())
+        plot_bar(
+            all_lin, 'rank','percent_abundance','label', ranks,
+            'Lineage rank','Percent abundance',
+            'Heavy‐chain lineage by rank',
+            os.path.join(outdir,'heavy_lineage_bar.png'),
+            os.path.join(outdir,'heavy_lineage_bar_data.tsv'),
+            args.split_names
+        )
+
+        # --- Gene usage bars ---
+        for gc, cap in (('v_call',args.max_v), ('j_call',args.max_j)):
+            for chain in ('heavy','kappa','light'):
+                parts = gene_dfs[gc][chain]
+                if not parts:
+                    logging.info(f"Skip bar {chain}/{gc}, no data")
+                    continue
+                df_long = pd.concat(parts, ignore_index=True)
+                avg = (df_long.groupby('gene_call')['percent_abundance']
+                              .mean()
+                              .reset_index()
+                              .sort_values('percent_abundance',ascending=False))
+                genes = avg['gene_call'].tolist()[:cap] if cap else avg['gene_call'].tolist()
+                idx2 = pd.MultiIndex.from_product(
+                    [df_long['label'].unique(), genes],
+                    names=['label','gene_call']
+                )
+                df_long = (df_long.set_index(['label','gene_call'])
+                                   .reindex(idx2, fill_value=0)
+                                   .reset_index())
+                plot_bar(
+                    df_long,'gene_call','percent_abundance','label', genes,
+                    gc,'Percent abundance',
+                    f'{chain.capitalize()}‐chain {gc} usage',
+                    os.path.join(outdir,f'{chain}_{gc}_bar.png'),
+                    os.path.join(outdir,f'{chain}_{gc}_bar_data.tsv'),
+                    args.split_names
+                )
+
+    # ==== BOX MODE ====
+    else:
+        # --- Heavy lineage box ---
+        recs = []
+        for grp_name, files in groups.items():
+            for f in files:
+                tmp = lineage_dfs.pop(0)  # in same order
+                # tmp has columns rank,percent_abundance,label
+                dfb = tmp.rename(columns={'percent_abundance':'val','label':'file'})
+                dfb['group'] = grp_name
+                recs.append(dfb[['rank','val','group']])
+        df_box = pd.concat(recs, ignore_index=True)
+        if args.max_cf:
+            df_box = df_box[df_box['rank'] <= args.max_cf]
+        order = sorted(df_box['rank'].unique())
+        plot_box(
+            df_box,'rank','val','group', order,
+            'Lineage rank','Percent abundance',
+            'Heavy‐chain lineage by rank (box)',
+            os.path.join(outdir,'heavy_lineage_box.png'),
+            os.path.join(outdir,'heavy_lineage_box_data.tsv')
+        )
+
+        # --- Gene usage boxes ---
+        for gc, cap in (('v_call',args.max_v), ('j_call',args.max_j)):
+            for chain in ('heavy','kappa','light'):
+                recs = []
+                for grp_name, files in groups.items():
+                    for _ in files:
+                        dfc = gene_dfs[gc][chain].pop(0)  # same order
+                        dfb = dfc.rename(columns={'percent_abundance':'val','label':'file'})
+                        dfb['group'] = grp_name
+                        recs.append(dfb[['gene_call','val','group']])
+                if not recs:
+                    logging.info(f"Skip box {chain}/{gc}, no data")
+                    continue
+                dfg = pd.concat(recs, ignore_index=True)
+                avg = (dfg.groupby('gene_call')['val']
+                          .mean().reset_index()
+                          .sort_values('val', ascending=False))
+                genes = avg['gene_call'].tolist()[:cap] if cap else avg['gene_call'].tolist()
+                dfg = dfg[dfg['gene_call'].isin(genes)]
+                plot_box(
+                    dfg,'gene_call','val','group', genes,
+                    gc,'Percent abundance',
+                    f'{chain.capitalize()}‐chain {gc} usage (box)',
+                    os.path.join(outdir,f'{chain}_{gc}_box.png'),
+                    os.path.join(outdir,f'{chain}_{gc}_box_data.tsv')
+                )
 
 if __name__ == "__main__":
     main()
