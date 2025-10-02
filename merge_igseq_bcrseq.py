@@ -3,18 +3,22 @@
 merge_igseq_bcrseq.py
 
 Merge Proteome Discoverer peptide-spectrum matches (PSMs) with BCR cDNA/IgBLAST
-(BCRseq) data, then locate where each peptide maps within the antibody variable
-region (FWR/CDR), report regional coverage (including CDR3), and summarize
-confident matches.
+(BCRseq) data, locate where each peptide maps within antibody regions (FWR/CDR),
+compute region coverage (including CDR3), and write chain-specific results.
 
-Highlights
-----------
+Features
+--------
 - Multiple PSM files:            -psm_files file1 file2 ...
 - Multiple BCR chain types:      --bcrseq CHAIN:file [--bcrseq CHAIN:file ...]
 - Per-chain extension/C1 files:  --suffix CHAIN:file [--suffix CHAIN:file ...]
-- I/L equivalence during matching (I or L → X)
-- Keeps peptides that map to exactly one BCR sequence
-- Outputs a merged TSV and a brief text summary
+- I/L equivalence for matching (I and L collapsed to 'X')
+- Optional handling of mixed PSM accessions (BCRseq_ + non-BCRseq references)
+- Chain-specific TSV outputs (+ chain-aware summary)
+- Deduplication across all columns prior to writing (applies to both verbose and non-verbose outputs)
+
+Note: This script now performs only merging and match localization.
+All downstream filtering (e.g., FWR-only removal, cluster-level uniqueness) should be
+implemented in a separate script.
 """
 
 from __future__ import annotations
@@ -24,7 +28,7 @@ import csv
 import os
 import re
 from collections import defaultdict
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 import pandas as pd
 
@@ -34,27 +38,14 @@ import pandas as pd
 # -------------------------------
 
 def parse_chain_specs(specs: Sequence[str] | None, flag: str) -> Dict[str, List[str]]:
-    """
-    Parse values like ["IGH:fileA.tsv", "IGK:fileB.tsv", "IGK:fileC.tsv"] into
-    a mapping {chain: [files...]}.
-
-    Parameters
-    ----------
-    specs : sequence of CHAIN:file strings
-    flag  : flag name for error messages (e.g., "--bcrseq", "--suffix")
-
-    Returns
-    -------
-    dict mapping chain -> list of file paths
-    """
+    """Parse values like ['IGH:fileA.tsv', 'IGK:fileB.tsv'] into {chain: [files...]}."""
     mapping: Dict[str, List[str]] = defaultdict(list)
     if not specs:
         return dict(mapping)
     for spec in specs:
         if ":" not in spec:
             raise ValueError(f"{flag} values must be CHAIN:FILE; got '{spec}'")
-        chain, file = spec.split(":", 1)
-        chain, file = chain.strip(), file.strip()
+        chain, file = (s.strip() for s in spec.split(":", 1))
         if not chain or not file:
             raise ValueError(f"{flag} values must be CHAIN:FILE; got '{spec}'")
         mapping[chain].append(file)
@@ -62,17 +53,7 @@ def parse_chain_specs(specs: Sequence[str] | None, flag: str) -> Dict[str, List[
 
 
 def read_suffixes_per_chain(suffix_specs: Dict[str, List[str]]) -> Dict[str, List[str]]:
-    """
-    Read per-chain extension/C1 files (one AA sequence per line).
-
-    Parameters
-    ----------
-    suffix_specs : dict chain -> list of files
-
-    Returns
-    -------
-    dict chain -> list of suffix sequences (uppercased, stripped)
-    """
+    """Read per-chain extension/C1 files (one AA sequence per line)."""
     per_chain: Dict[str, List[str]] = {}
     for chain, files in suffix_specs.items():
         seqs: List[str] = []
@@ -90,19 +71,10 @@ def require_suffixes_for_all_chains(
     bcrseq_chain_files: Dict[str, List[str]],
     chain_suffix_lists: Dict[str, List[str]],
 ) -> None:
-    """
-    Ensure that every chain provided via --bcrseq has at least one suffix entry
-    provided via --suffix.
-
-    Raises
-    ------
-    ValueError if any chain is missing or has zero suffix sequences.
-    """
+    """Ensure every chain in --bcrseq has at least one suffix sequence in --suffix."""
     missing = [ch for ch in bcrseq_chain_files if ch not in chain_suffix_lists]
     if missing:
-        raise ValueError(
-            "Missing --suffix for chain(s): " + ", ".join(sorted(missing))
-        )
+        raise ValueError("Missing --suffix for chain(s): " + ", ".join(sorted(missing)))
     empty = [ch for ch, seqs in chain_suffix_lists.items() if not seqs]
     if empty:
         raise ValueError(
@@ -112,13 +84,7 @@ def require_suffixes_for_all_chains(
 
 
 def build_known_suffixes(chain_suffix_lists: Dict[str, List[str]]) -> set[str]:
-    """
-    Build a set of all suffix sequences observed across chains.
-
-    Returns
-    -------
-    set of unique uppercase suffix sequences.
-    """
+    """Build a set of all suffix sequences observed across chains (uppercased)."""
     known: set[str] = set()
     for seqs in chain_suffix_lists.values():
         known.update(s.upper() for s in seqs if s)
@@ -131,17 +97,9 @@ def build_known_suffixes(chain_suffix_lists: Dict[str, List[str]]) -> set[str]:
 
 def normalize_bcr_id(raw: str, known_suffixes: set[str]) -> str:
     """
-    Normalize a BCR identifier so PSM accessions and BCRseq IDs align.
-
-    Rules
-    -----
-    - Strip leading 'BCRseq_' if present.
-    - If the final underscore-delimited token equals a known suffix, drop it.
-
-    Examples
-    --------
-    "BCRseq_XYZ_..._IGHJ4*01_STTA" -> "XYZ_..._IGHJ4*01"
-    "BCRseq_XYZ_..._IGHJ4*01"      -> "XYZ_..._IGHJ4*01"
+    Normalize a BCR identifier so PSM accessions and BCRseq IDs align:
+      - strip leading 'BCRseq_' if present
+      - drop trailing '_<suffix>' if <suffix> is in known_suffixes
     """
     s = str(raw).strip().strip('"')
     if s.startswith("BCRseq_"):
@@ -152,6 +110,18 @@ def normalize_bcr_id(raw: str, known_suffixes: set[str]) -> str:
     return "_".join(parts)
 
 
+def il_normalize(seq: str) -> str:
+    """Replace I and L with X for equivalence matching."""
+    return re.sub(r"[IL]", "X", str(seq))
+
+
+def extract_peptide(annot: str) -> str:
+    """Extract the peptide from PD’s 'Annotated Sequence' (prefix.PEPTIDE.suffix or raw)."""
+    s = str(annot)
+    parts = s.split(".")
+    return (parts[1] if len(parts) >= 3 else s).upper()
+
+
 # -------------------------------
 # I/O
 # -------------------------------
@@ -160,20 +130,10 @@ def load_data(
     psm_files: Sequence[str],
     bcrseq_chain_files: Dict[str, List[str]],
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Load and concatenate PSM files and chain-annotated BCRseq files.
-
-    Returns
-    -------
-    (pep_data, bcrseq_data) where
-      pep_data   : concatenated PSMs
-      bcrseq_data: concatenated BCR sequences with a 'chain_type' column
-    """
+    """Load and concatenate PSM files and chain-annotated BCRseq files."""
     print("Loading data...")
-
     psm_frames = [
-        pd.read_csv(path, sep="\t", quoting=csv.QUOTE_ALL, dtype=str)
-        for path in psm_files
+        pd.read_csv(path, sep="\t", quoting=csv.QUOTE_ALL, dtype=str) for path in psm_files
     ]
     for df in psm_frames:
         df.columns = df.columns.str.strip('"')
@@ -191,7 +151,6 @@ def load_data(
         raise ValueError("No BCRseq files provided.")
     bcrseq_data = pd.concat(bcr_frames, ignore_index=True, sort=False)
     print(f"Combined BCRseq file row count: {bcrseq_data.shape[0]}")
-
     return pep_data, bcrseq_data
 
 
@@ -199,42 +158,45 @@ def load_data(
 # Core transforms
 # -------------------------------
 
-def filter_igseq_data(pep_data: pd.DataFrame, known_suffixes: set[str]) -> pd.DataFrame:
+def filter_igseq_data(
+    pep_data: pd.DataFrame,
+    known_suffixes: set[str],
+    allow_mixed_accessions: bool,
+) -> pd.DataFrame:
     """
-    Keep PSM rows whose 'Protein Accessions' all begin with 'BCRseq_'.
-    Explode per-accession and build the normalized merge key 'accession'.
+    Prepare PSM data:
+      - split/trim Protein Accessions
+      - optionally keep rows that mix BCRseq_ and non-BCRseq accessions
+      - explode to one row per BCRseq accession
+      - normalize 'accession' key for merging
     """
     pep = pep_data.copy()
     pep["Protein Accessions"] = pep["Protein Accessions"].astype(str)
-
     pep["accession_list"] = (
         pep["Protein Accessions"]
         .str.split(";")
         .apply(lambda xs: [acc.strip().strip('"') for acc in xs if acc.strip().strip('"')])
     )
 
-    pep["valid_accessions"] = pep["accession_list"].apply(
-        lambda accs: all(a.startswith("BCRseq_") for a in accs)
-    )
-    pep = pep[pep["valid_accessions"]].drop(columns=["valid_accessions"])
-    print(
-        "IgSeq data count after filtering out accessions not starting with 'BCRseq_':",
-        pep.shape[0],
-    )
+    if allow_mixed_accessions:
+        pep["accession_list"] = pep["accession_list"].apply(
+            lambda accs: [a for a in accs if a.startswith("BCRseq_")]
+        )
+        pep = pep[pep["accession_list"].apply(len) > 0]
+    else:
+        pep = pep[pep["accession_list"].apply(lambda accs: all(a.startswith("BCRseq_") for a in accs))]
+
+    print("IgSeq data count after PSM accession filtering:", pep.shape[0])
 
     pep = pep.explode("accession_list", ignore_index=True)
-    pep["accession"] = pep["accession_list"].apply(
-        lambda s: normalize_bcr_id(s, known_suffixes)
-    )
+    pep["accession"] = pep["accession_list"].apply(lambda s: normalize_bcr_id(s, known_suffixes))
     return pep
 
 
 def choose_longest_suffix_per_chain(
     chain_suffix_lists: Dict[str, List[str]]
 ) -> Dict[str, str]:
-    """
-    For each chain, choose the longest suffix string to append to the BCR full sequence.
-    """
+    """For each chain, choose the longest suffix string to append to the BCR full sequence."""
     return {chain: max(seqs, key=len) for chain, seqs in chain_suffix_lists.items()}
 
 
@@ -244,127 +206,101 @@ def parse_bcrseq_data(
     known_suffixes: set[str],
 ) -> pd.DataFrame:
     """
-    Build a concatenated 'full_bcr_seq' per row from region AA fields and a
-    chain-specific downstream extension. Record region boundaries and a version
-    normalized for I/L equivalence. Produce 'bcrseq_id_processed' for merging.
+    Build 'full_bcr_seq' from region AA fields and chain-specific extension.
+    Record region boundaries and normalized version (I/L collapsed).
+    Produce 'bcrseq_id_processed' for merging.
     """
     df = bcrseq_data.copy()
-    region_names = [
-        "fwr1_aa", "cdr1_aa", "fwr2_aa", "cdr2_aa",
-        "fwr3_aa", "cdr3_aa", "fwr4_aa",
-    ]
-    for name in region_names:
+    regions = ["fwr1_aa", "cdr1_aa", "fwr2_aa", "cdr2_aa", "fwr3_aa", "cdr3_aa", "fwr4_aa"]
+    for name in regions:
         if name not in df.columns:
             df[name] = ""
         df[name] = df[name].fillna("")
 
-    longest_by_chain = choose_longest_suffix_per_chain(chain_suffix_lists)
+    longest = choose_longest_suffix_per_chain(chain_suffix_lists)
 
     def compute_row(row: pd.Series) -> pd.Series:
-        seqs = [str(row[name]).upper() for name in region_names]
+        seqs = [str(row[name]).upper() for name in regions]
         lengths = [len(s) for s in seqs]
-        positions = []
-        start = 0
-        for name, ln in zip(region_names, lengths):
+        positions, start = [], 0
+        for name, ln in zip(regions, lengths):
             end = start + ln
             positions.append({"region": name, "start": start, "end": end})
             start = end
-        suffix = longest_by_chain[row["chain_type"]]
+        suffix = longest[row["chain_type"]]
         positions.append({"region": "suffix", "start": start, "end": start + len(suffix)})
-        full_seq = "".join(seqs) + suffix
-        return pd.Series({"full_bcr_seq": full_seq, "region_positions": positions})
+        full = "".join(seqs) + suffix
+        return pd.Series({"full_bcr_seq": full, "region_positions": positions})
 
     df[["full_bcr_seq", "region_positions"]] = df.apply(compute_row, axis=1)
-
     print("Adding downstream peptide extensions (per chain):")
-    for ch, suf in longest_by_chain.items():
+    for ch, suf in longest.items():
         print(f"  chain={ch}: longest_suffix='{suf}'")
     print("BCRseq data count after adding chain-specific extension:", df.shape[0])
 
-    df["normalized_full_bcr_seq"] = df["full_bcr_seq"].str.replace(r"[IL]", "X", regex=True)
-
     if "bcrseq_id" not in df.columns:
         raise ValueError("BCRseq input must include a 'bcrseq_id' column.")
-
-    df["bcrseq_id_processed"] = df["bcrseq_id"].apply(
-        lambda s: normalize_bcr_id(s, known_suffixes)
-    )
+    df["normalized_full_bcr_seq"] = df["full_bcr_seq"].map(il_normalize)
+    df["bcrseq_id_processed"] = df["bcrseq_id"].apply(lambda s: normalize_bcr_id(s, known_suffixes))
     return df
 
 
 def merge_datasets(pep_data: pd.DataFrame, bcrseq_data: pd.DataFrame) -> pd.DataFrame:
-    """
-    Inner-join peptides to BCR sequences on their normalized IDs.
-    """
+    """Inner-join peptides to BCR sequences on normalized IDs."""
     print("Merging data on processed 'accession' and 'bcrseq_id'...")
-    merged = pep_data.merge(
-        bcrseq_data, left_on="accession", right_on="bcrseq_id_processed"
-    )
-    merged = merged.loc[:, ~merged.columns.duplicated()]  # ensure unique column names
+    merged = pep_data.merge(bcrseq_data, left_on="accession", right_on="bcrseq_id_processed")
+    merged = merged.loc[:, ~merged.columns.duplicated()]
     print(f"Merged data count: {merged.shape[0]}")
     return merged
 
 
 def find_matched_regions(merged_data: pd.DataFrame) -> pd.DataFrame:
     """
-    Extract peptide strings from 'Annotated Sequence', perform normalized
-    substring search against normalized BCR sequences, and compute regional
-    coverage (% of each BCR region overlapped by the peptide).
+    Extract peptide string from 'Annotated Sequence', perform I/L-collapsed
+    substring search vs 'normalized_full_bcr_seq', compute per-region coverage
+    (percent of region overlapped by the peptide match).
     """
     if merged_data.empty:
         print("No merged rows; skipping match search.")
-        cols = [
-            "matched_regions", "region_coverage_percentages", "match_start",
-            "match_end", "cdr3_coverage_percentage", "match_found",
-        ]
-        return merged_data.assign(
-            **{c: pd.Series(dtype=object) for c in cols}
-        )[:0]
+        cols = ["matched_regions", "region_coverage_percentages", "match_start",
+                "match_end", "cdr3_coverage_percentage", "match_found"]
+        return merged_data.assign(**{c: pd.Series(dtype=object) for c in cols})[:0]
 
     df = merged_data.copy()
 
     if "Annotated Sequence" not in df.columns:
         raise ValueError("PSM input must include 'Annotated Sequence' column.")
 
-    df["peptide_sequence"] = df["Annotated Sequence"].apply(
-        lambda x: str(x).split(".")[1].upper() if "." in str(x) else str(x).upper()
-    )
-
-    df["normalized_peptide_sequence"] = df["peptide_sequence"].str.replace(r"[IL]", "X", regex=True)
-    df["normalized_full_bcr_seq"] = df["full_bcr_seq"].str.replace(r"[IL]", "X", regex=True)
+    df["peptide_sequence"] = df["Annotated Sequence"].apply(extract_peptide)
+    df["normalized_peptide_sequence"] = df["peptide_sequence"].map(il_normalize)
+    df["normalized_full_bcr_seq"] = df["full_bcr_seq"].map(il_normalize)
 
     def regions_for_row(row: pd.Series) -> pd.Series:
-        text = row["normalized_full_bcr_seq"]
-        pep = row["normalized_peptide_sequence"]
+        text, pep = row["normalized_full_bcr_seq"], row["normalized_peptide_sequence"]
         positions = row["region_positions"]
-        matches = [m.start() for m in re.finditer(f"(?={re.escape(pep)})", text)]
-        if not matches:
-            return pd.Series({
-                "match_info_list": [],
-                "match_found": False,
-            })
-        info: List[dict] = []
-        pep_len = len(pep)
-        for start in matches:
-            end = start + pep_len
-            matched_regions: List[str] = []
-            coverage: Dict[str, float] = {}
-            cdr3_overlap, cdr3_len = 0, 0
+        hits = [m.start() for m in re.finditer(f"(?={re.escape(pep)})", text)]
+        if not hits:
+            return pd.Series({"match_info_list": [], "match_found": False})
+        info = []
+        p_len = len(pep)
+        for start in hits:
+            end = start + p_len
+            matched, coverage = [], {}
+            cdr3_overlap = cdr3_len = 0
             for comp in positions:
                 rname, rs, re_ = comp["region"], comp["start"], comp["end"]
                 rlen = max(0, re_ - rs)
                 ov_s, ov_e = max(start, rs), min(end, re_)
                 if ov_s < ov_e:
-                    matched_regions.append(rname)
-                    ov_len = ov_e - ov_s
+                    matched.append(rname)
                     if rlen > 0:
-                        coverage[rname] = (ov_len / rlen) * 100.0
+                        coverage[rname] = (ov_e - ov_s) / rlen * 100.0
                     if rname == "cdr3_aa":
-                        cdr3_overlap, cdr3_len = ov_len, rlen
+                        cdr3_overlap, cdr3_len = (ov_e - ov_s), rlen
             cov_str = ",".join(f"{k}:{v:.1f}%" for k, v in coverage.items())
-            cdr3_cov = (cdr3_overlap / cdr3_len) * 100.0 if cdr3_len > 0 else 0.0
+            cdr3_cov = (cdr3_overlap / cdr3_len * 100.0) if cdr3_len > 0 else 0.0
             info.append({
-                "matched_regions": ",".join(matched_regions),
+                "matched_regions": ",".join(matched),
                 "region_coverage_percentages": cov_str,
                 "match_start": start,
                 "match_end": end,
@@ -373,8 +309,6 @@ def find_matched_regions(merged_data: pd.DataFrame) -> pd.DataFrame:
         return pd.Series({"match_info_list": info, "match_found": True})
 
     out = df.join(df.apply(regions_for_row, axis=1))
-
-    # Expand per-match rows and extract fields
     out = out[out["match_found"]].explode("match_info_list")
     if out.empty:
         return out.assign(
@@ -395,73 +329,125 @@ def find_matched_regions(merged_data: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def filter_matches(matched_data: pd.DataFrame) -> pd.DataFrame:
-    """
-    Remove matches occurring only in framework/suffix regions; keep those
-    overlapping any CDR region.
-    """
-    if matched_data.empty:
-        return matched_data
+# -------------------------------
+# Output helpers
+# -------------------------------
 
-    def fwr_or_suffix_only(s: str) -> bool:
-        regions = [r for r in str(s).split(",") if r]
-        return all(not r.startswith("cdr") for r in regions) if regions else True
+NONVERBOSE_COLS = [
+    # PSM
+    "PSMs Peptide ID", "Annotated Sequence", "# Proteins", "Protein Accessions",
+    "Precursor Abundance",
+    # BCR (selection)
+    "sequence_id", "sequence", "sequence_aa", "v_call", "d_call", "j_call", "c_call",
+    "fwr1", "fwr1_aa", "cdr1", "cdr1_aa", "fwr2", "fwr2_aa", "cdr2", "cdr2_aa",
+    "fwr3", "fwr3_aa", "fwr4", "fwr4_aa", "cdr3", "cdr3_aa", "junction",
+    "junction_length", "junction_aa", "v_identity", "d_identity", "j_identity",
+    "c_identity", "ClusterID", "Collapsed",
+    # Derived
+    "full_bcr_seq", "normalized_full_bcr_seq",
+    "peptide_sequence", "normalized_peptide_sequence",
+    "region_coverage_percentages",
+]
 
-    df = matched_data.copy()
-    initial = df.shape[0]
-    df["is_only_fwr_or_suffix"] = df["matched_regions"].map(fwr_or_suffix_only)
-    df = df[~df["is_only_fwr_or_suffix"]].drop(columns=["is_only_fwr_or_suffix"])
-    print(
-        "Number of matches removed that occur only in FWR or suffix regions:",
-        initial - df.shape[0],
-    )
-    print(
-        "Number of matches remaining after removing FWR/suffix-only matches:",
-        df.shape[0],
-    )
+
+def ensure_columns(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
+    """Add any missing columns in `cols` as empty strings to allow column selection."""
+    missing = [c for c in cols if c not in df.columns]
+    if missing:
+        df = df.assign(**{c: "" for c in missing})
     return df
 
 
-def finalize_data(filtered_data: pd.DataFrame) -> pd.DataFrame:
+def write_chain_outputs(
+    final_data_fullcols: pd.DataFrame,
+    base_path: str,
+    verbose: bool,
+) -> Dict[str, str]:
     """
-    Count distinct BCR sequences per peptide and keep those with exactly one.
+    Write one TSV per chain_type and return {chain: out_path}.
+    Deduplication is assumed already applied on the full set of columns.
     """
-    if filtered_data.empty:
-        print("No matches to finalize.")
-        return filtered_data
+    if final_data_fullcols.empty:
+        return {}
+    paths: Dict[str, str] = {}
+    for chain, sub in final_data_fullcols.groupby("chain_type", dropna=False):
+        ch = str(chain) if pd.notna(chain) else "NA"
+        out_path = f"{base_path}_merged_{ch}.tsv"
+        to_write = sub if verbose else ensure_columns(sub, NONVERBOSE_COLS)[NONVERBOSE_COLS]
+        to_write.to_csv(out_path, sep="\t", index=False)
+        paths[ch] = out_path
+        print(f"Wrote: {out_path} (rows={to_write.shape[0]})")
+    return paths
 
-    counts = (
-        filtered_data.groupby("Annotated Sequence")["bcrseq_id"]
-        .nunique()
-        .rename("bcrseq_match_count")
-        .reset_index()
-    )
-    print("Statistical distribution of peptide-BCRseq match counts before filtering:")
-    print(counts["bcrseq_match_count"].describe())
 
-    df = filtered_data.merge(counts, on="Annotated Sequence", how="left")
-    final = df[df["bcrseq_match_count"] == 1]
-    print(
-        "Number of matches remaining after filtering peptides matching to only one BCRseq sequence:",
-        final.shape[0],
-    )
-    print("Statistical distribution of peptide-BCRseq match counts after filtering:")
-    if not final.empty:
-        print(final.groupby("Annotated Sequence")["bcrseq_id"].nunique().describe())
-    else:
-        print("empty")
-    return final
+def _to_hashable(x):
+    """Recursively convert lists/dicts into tuples so values are hashable."""
+    if isinstance(x, dict):
+        # sort keys for deterministic representation
+        return tuple(sorted((k, _to_hashable(v)) for k, v in x.items()))
+    if isinstance(x, (list, tuple)):
+        return tuple(_to_hashable(v) for v in x)
+    return x
+
+
+def dedupe_all_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Drop exact duplicate rows considering ALL columns, even if some contain
+    lists/dicts (e.g., region_positions). Keeps the first occurrence.
+    """
+    shadow = df.copy()
+    for col in shadow.columns:
+        # Only object columns need this; numeric/etc. are already hashable
+        if shadow[col].dtype == "object":
+            shadow[col] = shadow[col].map(_to_hashable)
+    mask = ~shadow.duplicated(keep="first")
+    return df.loc[mask]
+
+
+def write_summary(
+    base_path: str,
+    pep_count_after_psm_filter: int,
+    merged_data: pd.DataFrame,
+    matched_data: pd.DataFrame,
+    final_dedup: pd.DataFrame,
+) -> str:
+    """Write a simple chain-aware summary; return path."""
+    summary = f"{base_path}_match_summary.txt"
+
+    def chain_counts(df: pd.DataFrame, label: str) -> List[str]:
+        if df.empty:
+            return [f"{label}: 0 total (no data)"]
+        lines = [f"{label}: total={df.shape[0]}"]
+        for ch, sub in df.groupby("chain_type", dropna=False):
+            chs = str(ch) if pd.notna(ch) else "NA"
+            lines.append(f"  {chs}: {sub.shape[0]}")
+        return lines
+
+    with open(summary, "w") as f:
+        f.write(f"IgSeq data count after PSM filtering: {pep_count_after_psm_filter}\n")
+        for line in chain_counts(merged_data, "Merged rows"):
+            f.write(line + "\n")
+        for line in chain_counts(matched_data, "Matched rows (all regions considered)"):
+            f.write(line + "\n")
+        for line in chain_counts(final_dedup, "Rows after global deduplication"):
+            f.write(line + "\n")
+
+    print(f"Summary saved to {summary}")
+    return summary
 
 
 # -------------------------------
 # Orchestration
 # -------------------------------
 
-def main(psm_files: Sequence[str], bcrseq_specs: Sequence[str], suffix_specs: Sequence[str]) -> None:
-    """
-    Orchestrate loading, normalization, merging, matching, filtering,
-    and writing outputs.
-    """
+def main(
+    psm_files: Sequence[str],
+    bcrseq_specs: Sequence[str],
+    suffix_specs: Sequence[str],
+    allow_mixed_accessions: bool,
+    verbose: bool,
+) -> None:
+    """Load, normalize, merge, match, dedupe, and write outputs."""
     bcrseq_chain_files = parse_chain_specs(bcrseq_specs, "--bcrseq")
     suffix_chain_files = parse_chain_specs(suffix_specs, "--suffix")
     chain_suffix_lists = read_suffixes_per_chain(suffix_chain_files)
@@ -469,60 +455,27 @@ def main(psm_files: Sequence[str], bcrseq_specs: Sequence[str], suffix_specs: Se
     known_suffixes = build_known_suffixes(chain_suffix_lists)
 
     pep_data, bcrseq_data = load_data(psm_files, bcrseq_chain_files)
-    print(f"Initial IgSeq data count: {pep_data.shape[0]}")
+    pep_data = filter_igseq_data(pep_data, known_suffixes, allow_mixed_accessions)
+    pep_count_after_psm_filter = pep_data.shape[0]
 
-    pep_data = filter_igseq_data(pep_data, known_suffixes)
     bcrseq_data = parse_bcrseq_data(bcrseq_data, chain_suffix_lists, known_suffixes)
-
-    # Debug sample to help verify keys if needed (comment out in routine runs)
-    # print("PSM normalized accession sample:", pep_data["accession"].dropna().unique()[:5])
-    # print("BCR normalized id sample:", bcrseq_data["bcrseq_id_processed"].dropna().unique()[:5])
 
     merged_data = merge_datasets(pep_data, bcrseq_data)
     matched_data = find_matched_regions(merged_data)
-    filtered_data = filter_matches(matched_data)
-    final_data = finalize_data(filtered_data)
 
+    # Deduplicate across ALL columns before any column selection
+    final_dedup = dedupe_all_columns(matched_data)
+    print(f"Rows after global deduplication: {final_dedup.shape[0]}")
+
+    # Write per-chain outputs
     base = os.path.splitext(psm_files[0])[0]
-    out_tsv = base + "_merged.tsv"
-    final_data.to_csv(out_tsv, sep="\t", index=False)
-    print(f"Data saved to {out_tsv}")
+    outputs = write_chain_outputs(final_dedup, base, verbose=verbose)
 
-    total_full = final_data["full_bcr_seq"].shape[0]
-    uniq_full = final_data["full_bcr_seq"].nunique()
-    uniq_bcr = final_data["bcrseq_id"].nunique()
-    cdr3_only = final_data[final_data["matched_regions"] == "cdr3_aa"].shape[0]
-    cdr3_plus = final_data[
-        final_data["matched_regions"].str.contains("cdr3_aa", na=False)
-        & (final_data["matched_regions"] != "cdr3_aa")
-    ].shape[0]
+    # Summary
+    write_summary(base, pep_count_after_psm_filter, merged_data, matched_data, final_dedup)
 
-    summary = base + "_match_summary.txt"
-    with open(summary, "w") as f:
-        f.write(f"Initial IgSeq data count: {pep_data.shape[0]}\n")
-        f.write(
-            "IgSeq data count after filtering out accessions not starting with 'BCRseq_': "
-            f"{pep_data.shape[0]}\n"
-        )
-        f.write(f"Merged data count: {merged_data.shape[0]}\n")
-        f.write(
-            "Number of matches before removing FWR/suffix-only matches: "
-            f"{matched_data.shape[0]}\n"
-        )
-        f.write(
-            "Number of matches after removing FWR/suffix-only matches: "
-            f"{filtered_data.shape[0]}\n"
-        )
-        f.write(
-            "Number of matches remaining after filtering peptides matching to only one BCRseq sequence: "
-            f"{final_data.shape[0]}\n"
-        )
-        f.write(f"Number of total full_bcr_seq values in final matched data: {total_full}\n")
-        f.write(f"Number of unique full_bcr_seq values in final matched data: {uniq_full}\n")
-        f.write(f"Number of unique bcrseq_id values in final matched data: {uniq_bcr}\n")
-        f.write(f"Number of matches within cdr3_aa only: {cdr3_only}\n")
-        f.write(f"Number of matches within cdr3_aa plus other regions: {cdr3_plus}\n")
-    print(f"Summary saved to {summary}")
+    if not outputs:
+        print("No chain-specific TSVs were written (no final rows).")
 
 
 # -------------------------------
@@ -534,29 +487,35 @@ if __name__ == "__main__":
         description="Merge PSMs with BCRseq and compute peptide regional coverage."
     )
     parser.add_argument(
-        "-psm_files",
-        nargs="+",
-        required=True,
-        help="Proteome Discoverer PSM TXT/TSV file(s).",
+        "-psm_files", nargs="+", required=True,
+        help="Proteome Discoverer PSM TXT/TSV file(s)."
     )
     parser.add_argument(
-        "--bcrseq",
-        dest="bcrseq_specs",
-        nargs="+",
-        metavar="CHAIN:FILE",
-        required=True,
+        "--bcrseq", dest="bcrseq_specs", nargs="+", metavar="CHAIN:FILE", required=True,
         help="Repeatable. One or more BCRseq TSV files, annotated with chain type, "
-             "e.g., --bcrseq IGH:heavy.tsv IGK:kappa.tsv",
+             "e.g., --bcrseq IGH:heavy.tsv IGK:kappa.tsv"
     )
     parser.add_argument(
-        "--suffix",
-        dest="suffix_specs",
-        nargs="+",
-        metavar="CHAIN:FILE",
-        required=True,
+        "--suffix", dest="suffix_specs", nargs="+", metavar="CHAIN:FILE", required=True,
         help="Repeatable. Map each chain type to an extension/C1 file (one AA sequence per line). "
              "The longest sequence per chain is appended when forming full_bcr_seq. "
-             "Example: --suffix IGH:heavy_suffixes.txt IGK:kappa_suffixes.txt",
+             "Example: --suffix IGH:heavy_suffixes.txt IGK:kappa_suffixes.txt"
     )
+    parser.add_argument(
+        "--allow-mixed-accessions", action="store_true",
+        help="Keep PSM rows that include both BCRseq_ and non-BCRseq accessions "
+             "(only BCRseq_ tokens are used for merging). Default: require all accessions be BCRseq_."
+    )
+    parser.add_argument(
+        "--verbose", action="store_true",
+        help="Write full merged columns (default writes a concise subset)."
+    )
+
     args = parser.parse_args()
-    main(args.psm_files, args.bcrseq_specs, args.suffix_specs)
+    main(
+        psm_files=args.psm_files,
+        bcrseq_specs=args.bcrseq_specs,
+        suffix_specs=args.suffix_specs,
+        allow_mixed_accessions=args.allow_mixed_accessions,
+        verbose=args.verbose,
+    )
