@@ -14,11 +14,12 @@ Features
 - I/L equivalence for matching (I and L collapsed to 'X')
 - Optional handling of mixed PSM accessions (BCRseq_ + non-BCRseq references)
 - Chain-specific TSV outputs (+ chain-aware summary)
-- Deduplication across all columns prior to writing (applies to both verbose and non-verbose outputs)
+- De-dupe of exploded PSM rows by normalized accession to avoid suffix-pairs
+  (e.g., _STTA vs _STTAP collapsing to the same normalized accession)
 
-Note: This script now performs only merging and match localization.
-All downstream filtering (e.g., FWR-only removal, cluster-level uniqueness) should be
-implemented in a separate script.
+Note: This script performs only merging and match localization.
+Downstream biological filters (e.g., FWR-only removal, cluster-level uniqueness)
+should be implemented in a separate script.
 """
 
 from __future__ import annotations
@@ -169,6 +170,7 @@ def filter_igseq_data(
       - optionally keep rows that mix BCRseq_ and non-BCRseq accessions
       - explode to one row per BCRseq accession
       - normalize 'accession' key for merging
+      - de-dupe exploded rows by a stable PSM identity + normalized accession
     """
     pep = pep_data.copy()
     pep["Protein Accessions"] = pep["Protein Accessions"].astype(str)
@@ -188,8 +190,26 @@ def filter_igseq_data(
 
     print("IgSeq data count after PSM accession filtering:", pep.shape[0])
 
+    # Explode to per-accession rows
     pep = pep.explode("accession_list", ignore_index=True)
+
+    # Build normalized key used for merging
     pep["accession"] = pep["accession_list"].apply(lambda s: normalize_bcr_id(s, known_suffixes))
+
+    # De-dupe exploded PSM rows that only differ by suffix (e.g., _STTA vs _STTAP)
+    # Choose a stable PSM identity. Prefer "PSMs Peptide ID" if present; else fall back.
+    preferred = ["PSMs Peptide ID"]
+    fallback = ["Spectrum File", "First Scan", "Charge", "Annotated Sequence"]
+    ident_cols = [c for c in preferred if c in pep.columns]
+    if not ident_cols:
+        ident_cols = [c for c in fallback if c in pep.columns]
+    # Always include Annotated Sequence for safety if available
+    if "Annotated Sequence" in pep.columns and "Annotated Sequence" not in ident_cols:
+        ident_cols.append("Annotated Sequence")
+    # Final subset for row identity + normalized accession
+    subset_cols = ident_cols + ["accession"]
+    pep = pep.drop_duplicates(subset=subset_cols, keep="first")
+
     return pep
 
 
@@ -336,7 +356,7 @@ def find_matched_regions(merged_data: pd.DataFrame) -> pd.DataFrame:
 NONVERBOSE_COLS = [
     # PSM
     "PSMs Peptide ID", "Annotated Sequence", "# Proteins", "Protein Accessions",
-    "Precursor Abundance",
+    "DeltaScore", "Precursor Abundance",
     # BCR (selection)
     "sequence_id", "sequence", "sequence_aa", "v_call", "d_call", "j_call", "c_call",
     "fwr1", "fwr1_aa", "cdr1", "cdr1_aa", "fwr2", "fwr2_aa", "cdr2", "cdr2_aa",
@@ -359,18 +379,18 @@ def ensure_columns(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
 
 
 def write_chain_outputs(
-    final_data_fullcols: pd.DataFrame,
+    data_fullcols: pd.DataFrame,
     base_path: str,
     verbose: bool,
 ) -> Dict[str, str]:
     """
     Write one TSV per chain_type and return {chain: out_path}.
-    Deduplication is assumed already applied on the full set of columns.
+    (No global dedupe; duplicates should have been prevented upstream.)
     """
-    if final_data_fullcols.empty:
+    if data_fullcols.empty:
         return {}
     paths: Dict[str, str] = {}
-    for chain, sub in final_data_fullcols.groupby("chain_type", dropna=False):
+    for chain, sub in data_fullcols.groupby("chain_type", dropna=False):
         ch = str(chain) if pd.notna(chain) else "NA"
         out_path = f"{base_path}_merged_{ch}.tsv"
         to_write = sub if verbose else ensure_columns(sub, NONVERBOSE_COLS)[NONVERBOSE_COLS]
@@ -380,36 +400,11 @@ def write_chain_outputs(
     return paths
 
 
-def _to_hashable(x):
-    """Recursively convert lists/dicts into tuples so values are hashable."""
-    if isinstance(x, dict):
-        # sort keys for deterministic representation
-        return tuple(sorted((k, _to_hashable(v)) for k, v in x.items()))
-    if isinstance(x, (list, tuple)):
-        return tuple(_to_hashable(v) for v in x)
-    return x
-
-
-def dedupe_all_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Drop exact duplicate rows considering ALL columns, even if some contain
-    lists/dicts (e.g., region_positions). Keeps the first occurrence.
-    """
-    shadow = df.copy()
-    for col in shadow.columns:
-        # Only object columns need this; numeric/etc. are already hashable
-        if shadow[col].dtype == "object":
-            shadow[col] = shadow[col].map(_to_hashable)
-    mask = ~shadow.duplicated(keep="first")
-    return df.loc[mask]
-
-
 def write_summary(
     base_path: str,
     pep_count_after_psm_filter: int,
     merged_data: pd.DataFrame,
     matched_data: pd.DataFrame,
-    final_dedup: pd.DataFrame,
 ) -> str:
     """Write a simple chain-aware summary; return path."""
     summary = f"{base_path}_match_summary.txt"
@@ -429,8 +424,6 @@ def write_summary(
             f.write(line + "\n")
         for line in chain_counts(matched_data, "Matched rows (all regions considered)"):
             f.write(line + "\n")
-        for line in chain_counts(final_dedup, "Rows after global deduplication"):
-            f.write(line + "\n")
 
     print(f"Summary saved to {summary}")
     return summary
@@ -447,7 +440,7 @@ def main(
     allow_mixed_accessions: bool,
     verbose: bool,
 ) -> None:
-    """Load, normalize, merge, match, dedupe, and write outputs."""
+    """Load, normalize, merge, match, and write outputs (no global dedupe)."""
     bcrseq_chain_files = parse_chain_specs(bcrseq_specs, "--bcrseq")
     suffix_chain_files = parse_chain_specs(suffix_specs, "--suffix")
     chain_suffix_lists = read_suffixes_per_chain(suffix_chain_files)
@@ -463,19 +456,15 @@ def main(
     merged_data = merge_datasets(pep_data, bcrseq_data)
     matched_data = find_matched_regions(merged_data)
 
-    # Deduplicate across ALL columns before any column selection
-    final_dedup = dedupe_all_columns(matched_data)
-    print(f"Rows after global deduplication: {final_dedup.shape[0]}")
-
     # Write per-chain outputs
     base = os.path.splitext(psm_files[0])[0]
-    outputs = write_chain_outputs(final_dedup, base, verbose=verbose)
+    outputs = write_chain_outputs(matched_data, base, verbose=verbose)
 
     # Summary
-    write_summary(base, pep_count_after_psm_filter, merged_data, matched_data, final_dedup)
+    write_summary(base, pep_count_after_psm_filter, merged_data, matched_data)
 
     if not outputs:
-        print("No chain-specific TSVs were written (no final rows).")
+        print("No chain-specific TSVs were written (no matched rows).")
 
 
 # -------------------------------
