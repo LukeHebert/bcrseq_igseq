@@ -3,23 +3,23 @@
 merge_igseq_bcrseq.py
 
 Merge Proteome Discoverer peptide-spectrum matches (PSMs) with BCR cDNA/IgBLAST
-(BCRseq) data, locate where each peptide maps within antibody regions (FWR/CDR),
-compute region coverage (including CDR3), and write chain-specific results.
+(BCRseq) data (if heavy chain, must already be clustered with ClusterID column).
+Upon merging, the location where each peptide maps within BCRseq antibody regions
+(FWR/CDR) is determined and region coverage (with CDR3 emphasis) is computed.
+Chain-specific results are written to a new 'merge_igseq_bcrseq' directory next
+to the input PSM file.
 
 Features
 --------
-- Multiple PSM files:            -psm_files file1 file2 ...
-- Multiple BCR chain types:      --bcrseq CHAIN:file [--bcrseq CHAIN:file ...]
-- Per-chain extension/C1 files:  --suffix CHAIN:file [--suffix CHAIN:file ...]
-- I/L equivalence for matching (I and L collapsed to 'X')
-- Optional handling of mixed PSM accessions (BCRseq_ + non-BCRseq references)
-- Chain-specific TSV outputs (+ chain-aware summary)
-- De-dupe of exploded PSM rows by normalized accession to avoid suffix-pairs
-  (e.g., _STTA vs _STTAP collapsing to the same normalized accession)
-
-Note: This script performs only merging and match localization.
-Downstream biological filters (e.g., FWR-only removal, cluster-level uniqueness)
-should be implemented in a separate script.
+- Takes ≥1 PSM file(s):         -psm_files file1 file2 ...
+- Takes ≥1 BCRseq files:        --bcrseq CHAIN:file [--bcrseq CHAIN:file ...]
+- Takes extension/C seq file(s): --suffix CHAIN:file [--suffix CHAIN:file ...]
+- I/L equivalence for peptide region mapping (I and L collapsed to 'X')
+- Optional handling of mixed PSM accessions (default: allow mixed; use --no-mixed-accessions to require all-BCRseq)
+- Chain-specific TSV outputs (+ chain-aware, timestamped log)
+- Adds cdr3_cover_aa (AA count overlapped in CDR3) and psm_clusterid_list
+- Writes all outputs to a subdirectory named 'merge_igseq_bcrseq' next to the first PSM
+- All console prints are also captured into the log file
 """
 
 from __future__ import annotations
@@ -28,10 +28,31 @@ import argparse
 import csv
 import os
 import re
+import sys
 from collections import defaultdict
+from datetime import datetime
 from typing import Dict, List, Sequence, Tuple
 
 import pandas as pd
+
+
+# -------------------------------
+# Small print+log helper
+# -------------------------------
+
+_LOG_LINES: List[str] = []
+
+def log_print(*args, sep=" ", end="\n"):
+    """Print to stdout and also record the message for the run log."""
+    msg = sep.join(str(a) for a in args)
+    # Normalize newline handling: splitlines to capture multi-line prints faithfully
+    lines = (msg + ("" if end == "" else end)).splitlines()
+    for line in lines:
+        if line == "" and end == "":
+            # Exact print behavior: don't echo trailing blank when end=""
+            continue
+        _LOG_LINES.append(line)
+    print(msg, end=end)
 
 
 # -------------------------------
@@ -132,14 +153,14 @@ def load_data(
     bcrseq_chain_files: Dict[str, List[str]],
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Load and concatenate PSM files and chain-annotated BCRseq files."""
-    print("Loading data...")
+    log_print("Loading data...")
     psm_frames = [
         pd.read_csv(path, sep="\t", quoting=csv.QUOTE_ALL, dtype=str) for path in psm_files
     ]
     for df in psm_frames:
         df.columns = df.columns.str.strip('"')
     pep_data = pd.concat(psm_frames, ignore_index=True)
-    print(f"Combined PSM file row count: {pep_data.shape[0]}")
+    log_print(f"Combined PSM file row count: {pep_data.shape[0]}")
 
     bcr_frames: List[pd.DataFrame] = []
     for chain, files in bcrseq_chain_files.items():
@@ -151,7 +172,7 @@ def load_data(
     if not bcr_frames:
         raise ValueError("No BCRseq files provided.")
     bcrseq_data = pd.concat(bcr_frames, ignore_index=True, sort=False)
-    print(f"Combined BCRseq file row count: {bcrseq_data.shape[0]}")
+    log_print(f"Combined BCRseq file row count: {bcrseq_data.shape[0]}")
     return pep_data, bcrseq_data
 
 
@@ -159,7 +180,7 @@ def load_data(
 # Core transforms
 # -------------------------------
 
-def filter_igseq_data(
+def prep_igseq_data(
     pep_data: pd.DataFrame,
     known_suffixes: set[str],
     allow_mixed_accessions: bool,
@@ -173,6 +194,13 @@ def filter_igseq_data(
       - de-dupe exploded rows by a stable PSM identity + normalized accession
     """
     pep = pep_data.copy()
+
+    # Initial unique counts (pre-any processing)
+    init_unique_psm = pep["PSMs Peptide ID"].nunique(dropna=True) if "PSMs Peptide ID" in pep.columns else 0
+    init_unique_pep = pep["Annotated Sequence"].map(extract_peptide).nunique(dropna=True) if "Annotated Sequence" in pep.columns else 0
+    log_print(f"Initial unique PSMs Peptide ID: {init_unique_psm}")
+    log_print(f"Initial unique peptide_sequence: {init_unique_pep}")
+
     pep["Protein Accessions"] = pep["Protein Accessions"].astype(str)
     pep["accession_list"] = (
         pep["Protein Accessions"]
@@ -181,14 +209,16 @@ def filter_igseq_data(
     )
 
     if allow_mixed_accessions:
+        # Keep mixed rows, but drop non-BCRseq tokens for exploding/merging
         pep["accession_list"] = pep["accession_list"].apply(
             lambda accs: [a for a in accs if a.startswith("BCRseq_")]
         )
         pep = pep[pep["accession_list"].apply(len) > 0]
     else:
+        # Require all tokens be BCRseq_
         pep = pep[pep["accession_list"].apply(lambda accs: all(a.startswith("BCRseq_") for a in accs))]
 
-    print("IgSeq data count after PSM accession filtering:", pep.shape[0])
+    log_print("IgSeq data count after PSM filtering:", pep.shape[0])
 
     # Explode to per-accession rows
     pep = pep.explode("accession_list", ignore_index=True)
@@ -196,17 +226,11 @@ def filter_igseq_data(
     # Build normalized key used for merging
     pep["accession"] = pep["accession_list"].apply(lambda s: normalize_bcr_id(s, known_suffixes))
 
-    # De-dupe exploded PSM rows that only differ by suffix (e.g., _STTA vs _STTAP)
-    # Choose a stable PSM identity. Prefer "PSMs Peptide ID" if present; else fall back.
-    preferred = ["PSMs Peptide ID"]
-    fallback = ["Spectrum File", "First Scan", "Charge", "Annotated Sequence"]
-    ident_cols = [c for c in preferred if c in pep.columns]
-    if not ident_cols:
-        ident_cols = [c for c in fallback if c in pep.columns]
-    # Always include Annotated Sequence for safety if available
+    # De-dupe exploded PSM rows that only differ by suffix
+    psm_id = ["PSMs Peptide ID"] if "PSMs Peptide ID" in pep.columns else []
+    ident_cols = list(psm_id)
     if "Annotated Sequence" in pep.columns and "Annotated Sequence" not in ident_cols:
         ident_cols.append("Annotated Sequence")
-    # Final subset for row identity + normalized accession
     subset_cols = ident_cols + ["accession"]
     pep = pep.drop_duplicates(subset=subset_cols, keep="first")
 
@@ -253,10 +277,10 @@ def parse_bcrseq_data(
         return pd.Series({"full_bcr_seq": full, "region_positions": positions})
 
     df[["full_bcr_seq", "region_positions"]] = df.apply(compute_row, axis=1)
-    print("Adding downstream peptide extensions (per chain):")
+    log_print("Adding downstream peptide extensions (per chain):")
     for ch, suf in longest.items():
-        print(f"  chain={ch}: longest_suffix='{suf}'")
-    print("BCRseq data count after adding chain-specific extension:", df.shape[0])
+        log_print(f"  chain={ch}: longest_suffix='{suf}'")
+    log_print("BCRseq data count after adding chain-specific extension:", df.shape[0])
 
     if "bcrseq_id" not in df.columns:
         raise ValueError("BCRseq input must include a 'bcrseq_id' column.")
@@ -267,10 +291,10 @@ def parse_bcrseq_data(
 
 def merge_datasets(pep_data: pd.DataFrame, bcrseq_data: pd.DataFrame) -> pd.DataFrame:
     """Inner-join peptides to BCR sequences on normalized IDs."""
-    print("Merging data on processed 'accession' and 'bcrseq_id'...")
+    log_print("Merging data on processed 'accession' and 'bcrseq_id'...")
     merged = pep_data.merge(bcrseq_data, left_on="accession", right_on="bcrseq_id_processed")
     merged = merged.loc[:, ~merged.columns.duplicated()]
-    print(f"Merged data count: {merged.shape[0]}")
+    log_print(f"Merged data count: {merged.shape[0]}")
     return merged
 
 
@@ -278,12 +302,14 @@ def find_matched_regions(merged_data: pd.DataFrame) -> pd.DataFrame:
     """
     Extract peptide string from 'Annotated Sequence', perform I/L-collapsed
     substring search vs 'normalized_full_bcr_seq', compute per-region coverage
-    (percent of region overlapped by the peptide match).
+    (percent of region overlapped by the peptide match). Also computes:
+      - cdr3_coverage_percentage
+      - cdr3_cover_aa (integer AA overlap length within CDR3)
     """
     if merged_data.empty:
-        print("No merged rows; skipping match search.")
+        log_print("No merged rows; skipping match search.")
         cols = ["matched_regions", "region_coverage_percentages", "match_start",
-                "match_end", "cdr3_coverage_percentage", "match_found"]
+                "match_end", "cdr3_coverage_percentage", "cdr3_cover_aa", "match_found"]
         return merged_data.assign(**{c: pd.Series(dtype=object) for c in cols})[:0]
 
     df = merged_data.copy()
@@ -325,6 +351,7 @@ def find_matched_regions(merged_data: pd.DataFrame) -> pd.DataFrame:
                 "match_start": start,
                 "match_end": end,
                 "cdr3_coverage_percentage": cdr3_cov,
+                "cdr3_cover_aa": int(cdr3_overlap),
             })
         return pd.Series({"match_info_list": info, "match_found": True})
 
@@ -333,7 +360,8 @@ def find_matched_regions(merged_data: pd.DataFrame) -> pd.DataFrame:
     if out.empty:
         return out.assign(
             matched_regions="", region_coverage_percentages="",
-            match_start=pd.NA, match_end=pd.NA, cdr3_coverage_percentage=pd.NA
+            match_start=pd.NA, match_end=pd.NA,
+            cdr3_coverage_percentage=pd.NA, cdr3_cover_aa=pd.NA
         )
 
     get = lambda key: out["match_info_list"].apply(lambda d: d[key])
@@ -343,9 +371,10 @@ def find_matched_regions(merged_data: pd.DataFrame) -> pd.DataFrame:
         match_start=get("match_start"),
         match_end=get("match_end"),
         cdr3_coverage_percentage=get("cdr3_coverage_percentage"),
+        cdr3_cover_aa=get("cdr3_cover_aa"),
     ).drop(columns=["match_info_list"])
 
-    print("Number of rows where peptide sequence was found in full_bcr_seq:", out.shape[0])
+    log_print("Number of rows where peptide sequence was found in full_bcr_seq:", out.shape[0])
     return out
 
 
@@ -355,20 +384,20 @@ def find_matched_regions(merged_data: pd.DataFrame) -> pd.DataFrame:
 
 NONVERBOSE_COLS = [
     # PSM
-    "PSMs Peptide ID", "Annotated Sequence", "# Proteins", "Protein Accessions",
-    "DeltaScore", "Precursor Abundance",
+    "PSMs Peptide ID", "Annotated Sequence", "Protein Accessions",
+    "Precursor Abundance", "DeltaCn", "DeltaM [ppm]",
     # BCR (selection)
     "sequence_id", "sequence", "sequence_aa", "v_call", "d_call", "j_call", "c_call",
     "fwr1", "fwr1_aa", "cdr1", "cdr1_aa", "fwr2", "fwr2_aa", "cdr2", "cdr2_aa",
-    "fwr3", "fwr3_aa", "fwr4", "fwr4_aa", "cdr3", "cdr3_aa", "junction",
-    "junction_length", "junction_aa", "v_identity", "d_identity", "j_identity",
-    "c_identity", "ClusterID", "Collapsed",
+    "fwr3", "fwr3_aa", "fwr4", "fwr4_aa", "cdr3", "cdr3_aa",
+    "c_sequence_alignment", "c_sequence_alignment_aa",
+    "v_identity", "d_identity", "j_identity", "c_identity", "ClusterID", "Collapsed",
     # Derived
     "full_bcr_seq", "normalized_full_bcr_seq",
     "peptide_sequence", "normalized_peptide_sequence",
-    "region_coverage_percentages",
+    "region_coverage_percentages", "cdr3_coverage_percentage", "cdr3_cover_aa",
+    "psm_clusterid_list",
 ]
-
 
 def ensure_columns(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
     """Add any missing columns in `cols` as empty strings to allow column selection."""
@@ -378,36 +407,62 @@ def ensure_columns(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
     return df
 
 
+def _parse_clusterids_from_accessions(acc_str: str) -> str:
+    """
+    From a semicolon-separated 'Protein Accessions' string, keep the 3rd '_' token
+    (index 2) from each BCRseq_* entry, returning a semicolon-separated ClusterID list.
+    """
+    parts = [p.strip() for p in str(acc_str).split(";") if p.strip()]
+    out: List[str] = []
+    for p in parts:
+        if p.startswith("BCRseq_"):
+            toks = p.split("_")
+            if len(toks) >= 3:
+                out.append(toks[2])
+    return "; ".join(out)
+
+
 def write_chain_outputs(
     data_fullcols: pd.DataFrame,
-    base_path: str,
+    out_dir: str,
+    base_stem: str,
     verbose: bool,
 ) -> Dict[str, str]:
-    """
-    Write one TSV per chain_type and return {chain: out_path}.
-    (No global dedupe; duplicates should have been prevented upstream.)
-    """
+    """Write one TSV per chain_type into `out_dir` and return {chain: out_path}."""
     if data_fullcols.empty:
         return {}
     paths: Dict[str, str] = {}
     for chain, sub in data_fullcols.groupby("chain_type", dropna=False):
         ch = str(chain) if pd.notna(chain) else "NA"
-        out_path = f"{base_path}_merged_{ch}.tsv"
+        out_path = os.path.join(out_dir, f"{base_stem}_merged_{ch}.tsv")
         to_write = sub if verbose else ensure_columns(sub, NONVERBOSE_COLS)[NONVERBOSE_COLS]
         to_write.to_csv(out_path, sep="\t", index=False)
+        log_print(f"Wrote: {out_path} (rows={to_write.shape[0]})")
         paths[ch] = out_path
-        print(f"Wrote: {out_path} (rows={to_write.shape[0]})")
     return paths
 
 
-def write_summary(
-    base_path: str,
+def write_log(
+    out_dir: str,
+    base_stem: str,
+    cmdline: str,
     pep_count_after_psm_filter: int,
     merged_data: pd.DataFrame,
     matched_data: pd.DataFrame,
+    init_unique_psm: int,
+    init_unique_pepseq: int,
+    final_unique_psm: int,
+    final_unique_pepseq: int,
 ) -> str:
-    """Write a simple chain-aware summary; return path."""
-    summary = f"{base_path}_match_summary.txt"
+    """
+    Write a timestamped log file with counts. Includes:
+      - exact command line
+      - initial/final unique counts
+      - merged/matched counts (per chain)
+      - full console transcript captured via log_print
+    """
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    log_path = os.path.join(out_dir, f"{base_stem}_log_{ts}.txt")
 
     def chain_counts(df: pd.DataFrame, label: str) -> List[str]:
         if df.empty:
@@ -418,15 +473,25 @@ def write_summary(
             lines.append(f"  {chs}: {sub.shape[0]}")
         return lines
 
-    with open(summary, "w") as f:
+    with open(log_path, "w") as f:
+        f.write("Command line:\n")
+        f.write(cmdline + "\n\n")
+        f.write(f"Initial unique PSMs Peptide ID: {init_unique_psm}\n")
+        f.write(f"Initial unique peptide_sequence: {init_unique_pepseq}\n\n")
         f.write(f"IgSeq data count after PSM filtering: {pep_count_after_psm_filter}\n")
         for line in chain_counts(merged_data, "Merged rows"):
             f.write(line + "\n")
         for line in chain_counts(matched_data, "Matched rows (all regions considered)"):
             f.write(line + "\n")
+        f.write("\n")
+        f.write(f"Final unique PSMs Peptide ID: {final_unique_psm}\n")
+        f.write(f"Final unique peptide_sequence: {final_unique_pepseq}\n")
+        f.write("\n--- Console output transcript ---\n")
+        for line in _LOG_LINES:
+            f.write(line + "\n")
 
-    print(f"Summary saved to {summary}")
-    return summary
+    log_print(f"Log saved to {log_path}")
+    return log_path
 
 
 # -------------------------------
@@ -440,7 +505,12 @@ def main(
     allow_mixed_accessions: bool,
     verbose: bool,
 ) -> None:
-    """Load, normalize, merge, match, and write outputs (no global dedupe)."""
+    """Load, normalize, merge, match, and write outputs."""
+    # Output directory (next to first PSM)
+    first_psm_dir = os.path.dirname(os.path.abspath(psm_files[0]))
+    out_dir = os.path.join(first_psm_dir, "merge_igseq_bcrseq")
+    os.makedirs(out_dir, exist_ok=True)
+
     bcrseq_chain_files = parse_chain_specs(bcrseq_specs, "--bcrseq")
     suffix_chain_files = parse_chain_specs(suffix_specs, "--suffix")
     chain_suffix_lists = read_suffixes_per_chain(suffix_chain_files)
@@ -448,23 +518,52 @@ def main(
     known_suffixes = build_known_suffixes(chain_suffix_lists)
 
     pep_data, bcrseq_data = load_data(psm_files, bcrseq_chain_files)
-    pep_data = filter_igseq_data(pep_data, known_suffixes, allow_mixed_accessions)
+
+    # Initial unique counts (before any prep)
+    init_unique_psm = pep_data["PSMs Peptide ID"].nunique(dropna=True) if "PSMs Peptide ID" in pep_data.columns else 0
+    init_unique_pepseq = pep_data["Annotated Sequence"].map(extract_peptide).nunique(dropna=True) if "Annotated Sequence" in pep_data.columns else 0
+    log_print(f"Initial unique PSMs Peptide ID: {init_unique_psm}")
+    log_print(f"Initial unique peptide_sequence: {init_unique_pepseq}")
+
+    pep_data = prep_igseq_data(pep_data, known_suffixes, allow_mixed_accessions)
     pep_count_after_psm_filter = pep_data.shape[0]
 
     bcrseq_data = parse_bcrseq_data(bcrseq_data, chain_suffix_lists, known_suffixes)
 
     merged_data = merge_datasets(pep_data, bcrseq_data)
+
+    # Parse cluster IDs from the original PSM accessions (per-row)
+    merged_data["psm_clusterid_list"] = merged_data["Protein Accessions"].map(_parse_clusterids_from_accessions)
+
     matched_data = find_matched_regions(merged_data)
 
-    # Write per-chain outputs
-    base = os.path.splitext(psm_files[0])[0]
-    outputs = write_chain_outputs(matched_data, base, verbose=verbose)
+    # Final uniques (post-match)
+    final_unique_psm = matched_data["PSMs Peptide ID"].nunique(dropna=True) if "PSMs Peptide ID" in matched_data.columns else 0
+    final_unique_pepseq = matched_data["peptide_sequence"].nunique(dropna=True) if "peptide_sequence" in matched_data.columns else 0
+    log_print(f"Final unique PSMs Peptide ID: {final_unique_psm}")
+    log_print(f"Final unique peptide_sequence: {final_unique_pepseq}")
 
-    # Summary
-    write_summary(base, pep_count_after_psm_filter, merged_data, matched_data)
+    # Write per-chain outputs
+    base_stem = os.path.splitext(os.path.basename(psm_files[0]))[0]
+    outputs = write_chain_outputs(matched_data, out_dir, base_stem, verbose=verbose)
+
+    # Log file with counts, command line, and full console transcript
+    cmdline = " ".join(sys.argv)
+    write_log(
+        out_dir=out_dir,
+        base_stem=base_stem,
+        cmdline=cmdline,
+        pep_count_after_psm_filter=pep_count_after_psm_filter,
+        merged_data=merged_data,
+        matched_data=matched_data,
+        init_unique_psm=init_unique_psm,
+        init_unique_pepseq=init_unique_pepseq,
+        final_unique_psm=final_unique_psm,
+        final_unique_pepseq=final_unique_pepseq,
+    )
 
     if not outputs:
-        print("No chain-specific TSVs were written (no matched rows).")
+        log_print("No chain-specific TSVs were written (no matched rows).")
 
 
 # -------------------------------
@@ -487,13 +586,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--suffix", dest="suffix_specs", nargs="+", metavar="CHAIN:FILE", required=True,
         help="Repeatable. Map each chain type to an extension/C1 file (one AA sequence per line). "
-             "The longest sequence per chain is appended when forming full_bcr_seq. "
-             "Example: --suffix IGH:heavy_suffixes.txt IGK:kappa_suffixes.txt"
+             "The longest sequence per chain is appended when forming full_bcr_seq."
     )
     parser.add_argument(
-        "--allow-mixed-accessions", action="store_true",
-        help="Keep PSM rows that include both BCRseq_ and non-BCRseq accessions "
-             "(only BCRseq_ tokens are used for merging). Default: require all accessions be BCRseq_."
+        "--no-mixed-accessions", dest="allow_mixed_accessions",
+        action="store_false",
+        help="Require PSM rows to have ONLY BCRseq_ accessions. "
+             "Default: mixed-accession PSM rows are allowed; non-BCRseq tokens are dropped before merging."
     )
     parser.add_argument(
         "--verbose", action="store_true",
@@ -505,6 +604,6 @@ if __name__ == "__main__":
         psm_files=args.psm_files,
         bcrseq_specs=args.bcrseq_specs,
         suffix_specs=args.suffix_specs,
-        allow_mixed_accessions=args.allow_mixed_accessions,
+        allow_mixed_accessions=args.allow_mixed_accessions,  # default True; set False by --no-mixed-accessions
         verbose=args.verbose,
     )
