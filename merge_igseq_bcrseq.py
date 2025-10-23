@@ -385,7 +385,7 @@ def find_matched_regions(merged_data: pd.DataFrame) -> pd.DataFrame:
 NONVERBOSE_COLS = [
     # PSM
     "PSMs Peptide ID", "Annotated Sequence", "Protein Accessions",
-    "Precursor Abundance", "DeltaCn", "DeltaM [ppm]",
+    "Precursor Abundance", "DeltaCn", "DeltaM [ppm]", "Percolator PEP",
     # BCR (selection)
     "sequence_id", "sequence", "sequence_aa", "v_call", "d_call", "j_call", "c_call",
     "fwr1", "fwr1_aa", "cdr1", "cdr1_aa", "fwr2", "fwr2_aa", "cdr2", "cdr2_aa",
