@@ -18,6 +18,8 @@
 
 - Add a filter for chimeric PCR products early on in the workflow using e.g. "CHMMAIRRa" (PMID: 40060431 doi: 10.1101/2025.02.21.638809)
 
+- Add a flag for anytime a clone/BCR-seq has an unusually long CDR3 (e.g. >20 AA long) because these are often high binding and broadly neutralizing (e.g. in cows, in norovirus human IgA mAbs)
+
 ## Less Important
 
 - Add a caveat in the README.md that says these scripts have been tested primarily on ferret input (for humans e.g. you will need to add C gene database to your IMGT reference datadata files)
