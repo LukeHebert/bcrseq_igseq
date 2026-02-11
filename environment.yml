@@ -11,7 +11,7 @@ dependencies:
   - brotli=1.1.0=hb9d3cd8_2
   - brotli-bin=1.1.0=hb9d3cd8_2
   - bzip2=1.0.8=h4bc722e_7
-  - ca-certificates=2025.1.31=hbcca054_0
+  - ca-certificates=2026.1.4=hbd8a1cb_0
   - cairo=1.18.2=h3394656_1
   - contourpy=1.3.1=py312h68727a3_0
   - cycler=0.12.1=pyhd8ed1ab_1
@@ -37,6 +37,7 @@ dependencies:
   - lcms2=2.17=h717163a_0
   - ld_impl_linux-64=2.43=h712a8e2_4
   - lerc=4.0.0=h27087fc_0
+  - levenshtein=0.27.1=py312h2ec8cdc_0
   - libblas=3.9.0=31_h59b9bed_openblas
   - libbrotlicommon=1.1.0=hb9d3cd8_2
   - libbrotlidec=1.1.0=hb9d3cd8_2
@@ -93,9 +94,10 @@ dependencies:
   - numpy=2.2.3=py312h72c5963_0
   - openjpeg=2.5.3=h5fbd93e_0
   - openldap=2.6.9=he970967_0
-  - openssl=3.4.1=h7b32b05_0
+  - openssl=3.6.1=h35e630c_1
   - packaging=24.2=pyhd8ed1ab_2
   - pandas=2.2.3=py312hf9745cd_1
+  - patsy=1.0.1=pyhd8ed1ab_1
   - pcre2=10.44=hba22ea6_2
   - pillow=11.1.0=py312h80c1187_0
   - pip=25.0.1=pyh8b19718_0
@@ -105,17 +107,23 @@ dependencies:
   - pyside6=6.8.2=py312h91f0f75_0
   - python=3.12.0=hab00c5b_0_cpython
   - python-dateutil=2.9.0.post0=pyhff2d567_1
+  - python-levenshtein=0.27.1=pyhff2d567_0
   - python-tzdata=2025.1=pyhd8ed1ab_0
   - python_abi=3.12=5_cp312
   - pytz=2024.1=pyhd8ed1ab_0
   - qhull=2020.2=h434a139_5
   - qt6-main=6.8.2=h588cce1_0
+  - rapidfuzz=3.13.0=py312h2ec8cdc_0
   - readline=8.2=h8c095d6_2
   - scipy=1.15.2=py312ha707e6e_0
+  - seaborn=0.13.2=hd8ed1ab_3
+  - seaborn-base=0.13.2=pyhd8ed1ab_3
   - setuptools=75.8.0=pyhff2d567_0
   - six=1.17.0=pyhd8ed1ab_0
+  - statsmodels=0.14.4=py312hc0a28a1_0
   - tk=8.6.13=noxft_h4845f30_101
   - tornado=6.4.2=py312h66e93f0_0
+  - tqdm=4.67.3=pyh8f84b5b_0
   - tzdata=2025a=h78e105d_0
   - unicodedata2=16.0.0=py312h66e93f0_0
   - wayland=1.23.1=h3e06ad9_0
@@ -146,3 +154,5 @@ dependencies:
   - xz-gpl-tools=5.6.4=hbcc6ac9_0
   - xz-tools=5.6.4=hb9d3cd8_0
   - zstd=1.5.7=hb8e6e7a_1
+prefix: 
+  /stor/work/Georgiou/lsh848/code_misc/conda_local_install/miniconda3/envs/bcrseq_igseq
