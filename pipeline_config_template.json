@@ -1,0 +1,51 @@
+{
+  "logs_dir": "./pipeline_logs",
+  "scripts": {
+    "trim_merge": "/path/to/trim_merge.py",
+    "identify_genes": "/path/to/identify_genes.py",
+    "filter_collapse": "/path/to/filter_collapse.py",
+    "gupta_cluster": "/path/to/gupta_cluster.py",
+    "make_searchable": "/path/to/make_searchable.py"
+  },
+  "make_searchable_extensions_txt": "/path/to/extensions.txt",
+  "inputs": {
+    "trim_merge": {
+      "r1_regex": ".*(_R1|R1).*\\.fastq\\.gz$",
+      "r2_regex": ".*(_R2|R2).*\\.fastq\\.gz$"
+    },
+    "identify_genes": {
+      "assembled_glob": "*.assembled.fastq"
+    },
+    "filter_collapse": {
+      "annotated_tsv_glob": "*_IgBLAST.tsv"
+    },
+    "gupta_cluster": {
+      "filtered_tsv_glob": "*_filtered.tsv"
+    },
+    "make_searchable": {
+      "clustered_tsv_glob": "*_clustered.tsv"
+    }
+  },
+  "stages": {
+    "trim_merge": {
+      "enabled": true,
+      "args": ["--notrim"]
+    },
+    "identify_genes": {
+      "enabled": true,
+      "args": ["human", "--tool", "igblast"]
+    },
+    "filter_collapse": {
+      "enabled": true,
+      "args": ["--threshold", "2"]
+    },
+    "gupta_cluster": {
+      "enabled": true,
+      "args": ["--auto_threshold"]
+    },
+    "make_searchable": {
+      "enabled": true,
+      "args": []
+    }
+  }
+}
