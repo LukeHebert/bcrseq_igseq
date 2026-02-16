@@ -143,7 +143,7 @@ def get_stage_script(cfg: Dict[str, Any], stage: str) -> Path:
     p = scripts.get(stage)
     if not p:
         raise ValueError(f'Config missing scripts["{stage}"] path.')
-    return Path(p).expanduser().resolve()
+    return Path(p).expanduser()
 
 
 def list_sample_dirs(parent_dir: Path) -> List[Path]:
@@ -295,12 +295,12 @@ def main() -> None:
 
     require_tqdm_if_progress()
 
-    parent_dir = Path(args.parent_dir).expanduser().resolve()
-    config_path = Path(args.config).expanduser().resolve()
+    parent_dir = Path(args.parent_dir).expanduser()
+    config_path = Path(args.config).expanduser()
 
     cfg = load_config(config_path)
 
-    logs_root = Path(cfg.get("logs_dir", parent_dir / "pipeline_logs")).expanduser().resolve()
+    logs_root = Path(cfg.get("logs_dir", parent_dir / "pipeline_logs")).expanduser()
     logs_root.mkdir(parents=True, exist_ok=True)
 
     sample_dirs = list_sample_dirs(parent_dir)
@@ -489,7 +489,7 @@ def main() -> None:
                             raise ValueError(
                                 'Config must include "make_searchable_extensions_txt" path to the extensions .txt file.'
                             )
-                        ext_path = Path(extensions_txt).expanduser().resolve()
+                        ext_path = Path(extensions_txt).expanduser()
                         if not ext_path.exists():
                             raise FileNotFoundError(f"Extensions txt not found: {ext_path}")
 
