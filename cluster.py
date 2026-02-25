@@ -9,15 +9,6 @@ USAGE:
 python cluster.py --help
 '''
 
-'''
-Eventually, read this paper to implement in-house clustering method:
-Gupta NT, Adams KD, Briggs AW, Timberlake SC, Vigneault F, Kleinstein SH. 
-Hierarchical Clustering Can Identify B Cell Clones with High Confidence in 
-Ig Repertoire Sequencing Data. J Immunol. 2017 Mar 15;198(6):2489-2499. 
-doi: 10.4049/jimmunol.1601850. Epub 2017 Feb 8. PMID: 28179494; 
-PMCID: PMC5340603.
-'''
-
 import argparse
 import os
 import pandas as pd
@@ -26,9 +17,9 @@ from datetime import datetime
 def parse_arguments():
     """Parse and return command-line arguments."""
     parser = argparse.ArgumentParser(description='Process a TSV file containing cDNA sequences.')
-    parser.add_argument('annotation_tsv', type=str, 
+    parser.add_argument('annotation_tsv', type=str,
                         help='Path to the input TSV file from BCR cDNA read annotation by IgBLAST.')
-    parser.add_argument('clustering_executable', type=str, 
+    parser.add_argument('clustering_executable', type=str,
                         help='Path to the executable file for clustering. Clustering executable must take a TXT file with single unlabeled column of CDR3 AA seqs & create a TSV file of two unlabeled columns, the input CDR3 AA seqs & their new cluster IDs.')
     return parser.parse_args()
 
@@ -45,18 +36,20 @@ def cluster(df, tsv_path, executable_path):
     unique_cdr3 = df['cdr3_aa'].drop_duplicates().dropna()
     cdr3s_file = os.path.splitext(tsv_path)[0] + '_cdr3s_aa.txt'
     unique_cdr3.to_csv(cdr3s_file, index=False, header=False)
-    
+
     # Run the clustering executable
     clusterIDs_file = os.path.splitext(tsv_path)[0] + '_clusterIDs.tsv'
-    os.system(f"{executable_path} -f {cdr3s_file} > {clusterIDs_file}")
-    
+    os.system(f'"{executable_path}" -f "{cdr3s_file}" > "{clusterIDs_file}"')
+
     # Merge the cluster assignments with the original DataFrame
     cluster_results = pd.read_csv(clusterIDs_file, sep='\t', header=None, names=['cdr3_aa', 'ClusterID'])
     merged_df = pd.merge(df, cluster_results, on='cdr3_aa', how='left')
-    
+
     # Sort the DataFrame
-    clustered_df = merged_df.sort_values(by=['ClusterID', 'nt_seq_count', 'cdr1_aa', 'cdr2_aa', 'cdr3_aa'], 
-                                        ascending=[True, False, True, True, True])
+    clustered_df = merged_df.sort_values(
+        by=['ClusterID', 'nt_seq_count', 'cdr1_aa', 'cdr2_aa', 'cdr3_aa'],
+        ascending=[True, False, True, True, True]
+    )
     return clustered_df
 
 def main():
@@ -65,19 +58,19 @@ def main():
     log_file, log_path = setup_logging(args.annotation_tsv)
     try:
         log_file.write(f"Processing started for {args.annotation_tsv} using executable {args.clustering_executable}\n")
-        
+
         # Load TSV file directly in main for simplicity
         df = pd.read_csv(args.annotation_tsv, sep='\t')
         log_file.write(f"Initial row count: {len(df)}\n")
-        
+
         # Cluster the data (includes writing unique CDR3s, running clustering, merging results, and sorting)
         clustered_df = cluster(df, args.annotation_tsv, args.clustering_executable)
-        
+
         # Save the final sorted DataFrame
         clustered_file = os.path.splitext(args.annotation_tsv)[0] + '_clustered.tsv'
         clustered_df.to_csv(clustered_file, sep='\t', index=False)
-        
-        log_file.write(f"Final sorted dataframe saved to {output_file}\n")
+
+        log_file.write(f"Final sorted dataframe saved to {clustered_file}\n")
         log_file.write("Processing completed successfully.\n")
     finally:
         log_file.close()
