@@ -9,14 +9,14 @@ It can run any/all of these stages (in order):
 1) trim_merge.py
 2) identify_genes.py
 3) filter_collapse.py
-4) gupta_cluster.py
+4) cluster.py
 5) make_searchable.py
 
 Inputs:
 - parent directory containing sample subdirectories
 - a config file specifying how to run each stage
 - optional stage to start from
-- optional flag to annotate final clustered TSVs with isotype + tissue_type parsed
+- optional flag to annotate filtered TSVs with isotype + tissue_type parsed
   from subdirectory names
 
 Isotype & tissue parsing rules (only if --annotate_isotype_tissue is set):
@@ -27,13 +27,17 @@ Isotype & tissue parsing rules (only if --annotate_isotype_tissue is set):
 Example:
   mydata_IgG_ttblood/
   -> isotype="IgG", tissue_type="blood"
+
+Behavior change when --annotate_isotype_tissue is set:
+- isotype/tissue_type columns are added after filter_collapse (to the filtered TSV)
+- all (annotated) filtered TSVs are concatenated into one combined dataset
+- clustering is run once on the combined dataset (cluster.py by default)
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import sys
 import subprocess
@@ -58,7 +62,7 @@ except Exception:
     tqdm = None
 
 
-STAGES_ORDER = ["trim_merge", "identify_genes", "filter_collapse", "gupta_cluster", "make_searchable"]
+STAGES_ORDER = ["trim_merge", "identify_genes", "filter_collapse", "cluster", "make_searchable"]
 
 
 @dataclass
@@ -229,19 +233,34 @@ def sh_quote(s: str) -> str:
     return s
 
 
-def annotate_clustered_tsv(clustered_tsv: Path, isotype: str, tissue: str) -> Path:
+def annotate_tsv_with_isotype_tissue(tsv_path: Path, isotype: str, tissue: str) -> Path:
     """
-    Add 'isotype' and 'tissue_type' columns to the clustered TSV.
+    Add 'isotype' and 'tissue_type' columns to a TSV.
     Writes a new file next to the original with suffix _annotated.tsv.
     """
     if pd is None:
         raise RuntimeError("pandas is required for annotation. Install pandas or disable annotation.")
 
-    df = pd.read_csv(clustered_tsv, sep="\t", dtype=str)
+    df = pd.read_csv(tsv_path, sep="\t", dtype=str)
     df["isotype"] = isotype
     df["tissue_type"] = tissue
-    out_path = clustered_tsv.with_name(clustered_tsv.stem + "_annotated.tsv")
+    out_path = tsv_path.with_name(tsv_path.stem + "_annotated.tsv")
     df.to_csv(out_path, sep="\t", index=False)
+    return out_path
+
+
+def concatenate_tsvs(tsv_paths: List[Path], out_path: Path) -> Path:
+    if pd is None:
+        raise RuntimeError("pandas is required for concatenation. Install pandas or disable concatenation.")
+    if not tsv_paths:
+        raise RuntimeError("No TSVs provided for concatenation.")
+
+    frames = []
+    for p in tsv_paths:
+        frames.append(pd.read_csv(p, sep="\t", dtype=str))
+    combined = pd.concat(frames, axis=0, ignore_index=True, sort=False)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    combined.to_csv(out_path, sep="\t", index=False)
     return out_path
 
 
@@ -279,7 +298,7 @@ def main() -> None:
     parser.add_argument(
         "--annotate_isotype_tissue",
         action="store_true",
-        help="Annotate clustered TSV outputs with isotype and tissue_type parsed from subdirectory names.",
+        help="Annotate filtered TSV outputs with isotype and tissue_type parsed from subdirectory names.",
     )
     parser.add_argument(
         "--continue_on_error",
@@ -316,7 +335,7 @@ def main() -> None:
 
     assembled_glob = str(input_rules.get("identify_genes", {}).get("assembled_glob", "*.assembled.fastq"))
     annotated_glob = str(input_rules.get("filter_collapse", {}).get("annotated_tsv_glob", "*_IgBLAST.tsv"))
-    filtered_glob = str(input_rules.get("gupta_cluster", {}).get("filtered_tsv_glob", "*_filtered.tsv"))
+    filtered_glob = str(input_rules.get("cluster", {}).get("filtered_tsv_glob", "*_filtered.tsv"))
     clustered_glob = str(input_rules.get("make_searchable", {}).get("clustered_tsv_glob", "*_clustered.tsv"))
     extensions_txt = cfg.get("make_searchable_extensions_txt", None)
 
@@ -325,10 +344,29 @@ def main() -> None:
     # Resolve scripts once
     scripts = {stage: get_stage_script(cfg, stage) for stage in STAGES_ORDER}
 
-    total_units = len(sample_dirs) * max(1, len(planned_stages))
+    # Progress units: per-sample stages up to filter_collapse run per sample, then global stages once
+    per_sample_stages = []
+    for stage in STAGES_ORDER[start_idx:]:
+        if not stage_enabled(cfg, stage):
+            continue
+        if stage in ["trim_merge", "identify_genes", "filter_collapse"]:
+            per_sample_stages.append(stage)
+
+    global_stages = []
+    for stage in STAGES_ORDER[start_idx:]:
+        if not stage_enabled(cfg, stage):
+            continue
+        if stage in ["cluster", "make_searchable"]:
+            global_stages.append(stage)
+
+    total_units = len(sample_dirs) * len(per_sample_stages) + len(global_stages)
+    total_units = max(1, total_units)
     pbar = tqdm(total=total_units, unit="stage", dynamic_ncols=True)
 
+    produced_filtered_by_sample: Dict[str, Path] = {}
+
     try:
+        # Per-sample phases (up to filter_collapse)
         for sample_dir in sample_dirs:
             sample_name = sample_dir.name
             sample_logs_dir = logs_root / sample_name
@@ -347,9 +385,10 @@ def main() -> None:
             produced_assembled: Optional[Path] = None
             produced_annotated: Optional[Path] = None
             produced_filtered: Optional[Path] = None
-            produced_clustered: Optional[Path] = None
 
             for stage in STAGES_ORDER[start_idx:]:
+                if stage not in ["trim_merge", "identify_genes", "filter_collapse"]:
+                    continue
                 if not stage_enabled(cfg, stage):
                     continue
 
@@ -359,7 +398,9 @@ def main() -> None:
                 try:
                     if stage == "trim_merge":
                         r1, r2 = find_r1_r2(sample_dir, r1r2_patterns)
-                        cmd = [sys.executable, str(scripts["trim_merge"]), str(r1), str(r2)] + get_stage_args(cfg, "trim_merge")
+                        cmd = [sys.executable, str(scripts["trim_merge"]), str(r1), str(r2)] + get_stage_args(
+                            cfg, "trim_merge"
+                        )
                         if args.dry_run:
                             print(f"[DRY RUN] {sample_name} trim_merge: {' '.join(map(sh_quote, cmd))}")
                             rc = 0
@@ -368,7 +409,11 @@ def main() -> None:
                             cmd_str = " ".join(map(sh_quote, cmd))
                         else:
                             rc, stdout_path, stderr_path, cmd_str = run_command(
-                                cmd=cmd, workdir=sample_dir, logs_dir=sample_logs_dir, stage="trim_merge", sample_name=sample_name
+                                cmd=cmd,
+                                workdir=sample_dir,
+                                logs_dir=sample_logs_dir,
+                                stage="trim_merge",
+                                sample_name=sample_name,
                             )
                         if rc == 0:
                             matches = sorted(sample_dir.glob("*.assembled.fastq"))
@@ -407,7 +452,14 @@ def main() -> None:
                                 produced_annotated = matches2[0] if matches2 else None
                         all_results.append(
                             StageResult(
-                                "identify_genes", sample_dir, rc == 0, stdout_path, stderr_path, rc, cmd_str, produced_annotated
+                                "identify_genes",
+                                sample_dir,
+                                rc == 0,
+                                stdout_path,
+                                stderr_path,
+                                rc,
+                                cmd_str,
+                                produced_annotated,
                             )
                         )
                         if rc != 0 and not args.continue_on_error:
@@ -416,6 +468,7 @@ def main() -> None:
                     elif stage == "filter_collapse":
                         if produced_annotated is None:
                             produced_annotated = find_single_input(sample_dir, annotated_glob)
+
                         cmd = [sys.executable, str(scripts["filter_collapse"]), str(produced_annotated)] + get_stage_args(
                             cfg, "filter_collapse"
                         )
@@ -436,87 +489,33 @@ def main() -> None:
                         if rc == 0:
                             produced_filtered = Path(str(produced_annotated).replace(".tsv", "_filtered.tsv"))
                             if not produced_filtered.exists():
-                                matches = sorted(sample_dir.glob("*_filtered.tsv"))
+                                matches = sorted(sample_dir.glob(filtered_glob))
                                 produced_filtered = matches[0] if matches else None
+
+                            if produced_filtered is not None and args.annotate_isotype_tissue:
+                                produced_filtered = annotate_tsv_with_isotype_tissue(
+                                    produced_filtered,
+                                    isotype=isotype,  # type: ignore[arg-type]
+                                    tissue=tissue,  # type: ignore[arg-type]
+                                )
+
+                            if produced_filtered is not None:
+                                produced_filtered_by_sample[sample_name] = produced_filtered
+
                         all_results.append(
                             StageResult(
-                                "filter_collapse", sample_dir, rc == 0, stdout_path, stderr_path, rc, cmd_str, produced_filtered
+                                "filter_collapse",
+                                sample_dir,
+                                rc == 0,
+                                stdout_path,
+                                stderr_path,
+                                rc,
+                                cmd_str,
+                                produced_filtered,
                             )
                         )
                         if rc != 0 and not args.continue_on_error:
                             raise RuntimeError(f"filter_collapse failed for {sample_name} (rc={rc})")
-
-                    elif stage == "gupta_cluster":
-                        if produced_filtered is None:
-                            produced_filtered = find_single_input(sample_dir, filtered_glob)
-                        cmd = [sys.executable, str(scripts["gupta_cluster"]), str(produced_filtered)] + get_stage_args(
-                            cfg, "gupta_cluster"
-                        )
-                        if args.dry_run:
-                            print(f"[DRY RUN] {sample_name} gupta_cluster: {' '.join(map(sh_quote, cmd))}")
-                            rc = 0
-                            stdout_path = sample_logs_dir / f"{sample_name}.gupta_cluster.stdout.txt"
-                            stderr_path = sample_logs_dir / f"{sample_name}.gupta_cluster.stderr.txt"
-                            cmd_str = " ".join(map(sh_quote, cmd))
-                        else:
-                            rc, stdout_path, stderr_path, cmd_str = run_command(
-                                cmd=cmd,
-                                workdir=sample_dir,
-                                logs_dir=sample_logs_dir,
-                                stage="gupta_cluster",
-                                sample_name=sample_name,
-                            )
-                        if rc == 0:
-                            produced_clustered = Path(str(produced_filtered).replace("_filtered.tsv", "_filtered_clustered.tsv"))
-                            if not produced_clustered.exists():
-                                matches = sorted(sample_dir.glob("*_clustered.tsv"))
-                                produced_clustered = matches[0] if matches else None
-
-                        if rc == 0 and args.annotate_isotype_tissue and produced_clustered is not None:
-                            annotated_out = annotate_clustered_tsv(produced_clustered, isotype=isotype, tissue=tissue)  # type: ignore[arg-type]
-                            produced_clustered = annotated_out
-
-                        all_results.append(
-                            StageResult(
-                                "gupta_cluster", sample_dir, rc == 0, stdout_path, stderr_path, rc, cmd_str, produced_clustered
-                            )
-                        )
-                        if rc != 0 and not args.continue_on_error:
-                            raise RuntimeError(f"gupta_cluster failed for {sample_name} (rc={rc})")
-
-                    elif stage == "make_searchable":
-                        if extensions_txt is None:
-                            raise ValueError(
-                                'Config must include "make_searchable_extensions_txt" path to the extensions .txt file.'
-                            )
-                        ext_path = Path(extensions_txt).expanduser()
-                        if not ext_path.exists():
-                            raise FileNotFoundError(f"Extensions txt not found: {ext_path}")
-
-                        clustered_input = find_single_input(sample_dir, clustered_glob)
-
-                        cmd = [sys.executable, str(scripts["make_searchable"]), str(clustered_input), str(ext_path)] + get_stage_args(
-                            cfg, "make_searchable"
-                        )
-                        if args.dry_run:
-                            print(f"[DRY RUN] {sample_name} make_searchable: {' '.join(map(sh_quote, cmd))}")
-                            rc = 0
-                            stdout_path = sample_logs_dir / f"{sample_name}.make_searchable.stdout.txt"
-                            stderr_path = sample_logs_dir / f"{sample_name}.make_searchable.stderr.txt"
-                            cmd_str = " ".join(map(sh_quote, cmd))
-                        else:
-                            rc, stdout_path, stderr_path, cmd_str = run_command(
-                                cmd=cmd,
-                                workdir=sample_dir,
-                                logs_dir=sample_logs_dir,
-                                stage="make_searchable",
-                                sample_name=sample_name,
-                            )
-                        all_results.append(
-                            StageResult("make_searchable", sample_dir, rc == 0, stdout_path, stderr_path, rc, cmd_str, None)
-                        )
-                        if rc != 0 and not args.continue_on_error:
-                            raise RuntimeError(f"make_searchable failed for {sample_name} (rc={rc})")
 
                     else:
                         raise RuntimeError(f"Unknown stage: {stage}")
@@ -527,6 +526,138 @@ def main() -> None:
                         raise
                 finally:
                     pbar.update(1)
+
+        # Global phases (cluster, then make_searchable) run once on concatenated data
+        combined_filtered: Optional[Path] = None
+        combined_clustered: Optional[Path] = None
+
+        if "cluster" in global_stages:
+            stage = "cluster"
+            sample_name = "ALL_SAMPLES"
+            sample_dir = parent_dir
+            sample_logs_dir = logs_root / sample_name
+            sample_logs_dir.mkdir(parents=True, exist_ok=True)
+
+            pbar.set_description(sample_name)
+            pbar.set_postfix_str(stage)
+
+            try:
+                filtered_inputs = list(produced_filtered_by_sample.values())
+                if not filtered_inputs:
+                    raise RuntimeError("No filtered TSVs were produced; cannot run global clustering.")
+
+                combined_filtered = logs_root / f"combined_filtered_{now_stamp()}.tsv"
+                if args.dry_run:
+                    print(
+                        f"[DRY RUN] {sample_name} concatenate: "
+                        f"{len(filtered_inputs)} TSVs -> {combined_filtered}"
+                    )
+                else:
+                    concatenate_tsvs(filtered_inputs, combined_filtered)
+
+                cluster_args = get_stage_args(cfg, "cluster")
+                if not cluster_args:
+                    raise ValueError(
+                        'Config "stages.cluster.args" must include at least the clustering_executable path '
+                        "(the second positional arg to cluster.py)."
+                    )
+                clustering_executable = cluster_args[0]
+                extra_cluster_args = cluster_args[1:]
+
+                cmd = [sys.executable, str(scripts["cluster"]), str(combined_filtered), str(clustering_executable)] + extra_cluster_args
+
+                if args.dry_run:
+                    print(f"[DRY RUN] {sample_name} cluster: {' '.join(map(sh_quote, cmd))}")
+                    rc = 0
+                    stdout_path = sample_logs_dir / f"{sample_name}.cluster.stdout.txt"
+                    stderr_path = sample_logs_dir / f"{sample_name}.cluster.stderr.txt"
+                    cmd_str = " ".join(map(sh_quote, cmd))
+                else:
+                    rc, stdout_path, stderr_path, cmd_str = run_command(
+                        cmd=cmd,
+                        workdir=logs_root,
+                        logs_dir=sample_logs_dir,
+                        stage="cluster",
+                        sample_name=sample_name,
+                    )
+
+                if rc == 0:
+                    # cluster.py writes <input>_clustered.tsv
+                    combined_clustered = combined_filtered.with_suffix("").with_name(combined_filtered.stem + "_clustered.tsv")
+                    if not combined_clustered.exists():
+                        matches = sorted(logs_root.glob(combined_filtered.stem + "*_clustered.tsv"))
+                        combined_clustered = matches[0] if matches else None
+
+                all_results.append(
+                    StageResult("cluster", sample_dir, rc == 0, stdout_path, stderr_path, rc, cmd_str, combined_clustered)
+                )
+
+                if rc != 0 and not args.continue_on_error:
+                    raise RuntimeError(f"cluster failed (rc={rc})")
+
+            except Exception as ex:
+                eprint(f"[ERROR] {sample_name} {stage}: {ex}")
+                if not args.continue_on_error:
+                    raise
+            finally:
+                pbar.update(1)
+
+        if "make_searchable" in global_stages:
+            stage = "make_searchable"
+            sample_name = "ALL_SAMPLES"
+            sample_dir = parent_dir
+            sample_logs_dir = logs_root / sample_name
+            sample_logs_dir.mkdir(parents=True, exist_ok=True)
+
+            pbar.set_description(sample_name)
+            pbar.set_postfix_str(stage)
+
+            try:
+                if extensions_txt is None:
+                    raise ValueError('Config must include "make_searchable_extensions_txt" path to the extensions .txt file.')
+
+                ext_path = Path(extensions_txt).expanduser()
+                if not ext_path.exists():
+                    raise FileNotFoundError(f"Extensions txt not found: {ext_path}")
+
+                if combined_clustered is None:
+                    # Fall back to finding a clustered file in logs_root (useful if starting at make_searchable)
+                    matches = sorted(logs_root.glob(clustered_glob))
+                    combined_clustered = matches[0] if matches else None
+
+                if combined_clustered is None:
+                    raise RuntimeError("No combined clustered TSV found; cannot run make_searchable.")
+
+                cmd = [sys.executable, str(scripts["make_searchable"]), str(combined_clustered), str(ext_path)] + get_stage_args(
+                    cfg, "make_searchable"
+                )
+
+                if args.dry_run:
+                    print(f"[DRY RUN] {sample_name} make_searchable: {' '.join(map(sh_quote, cmd))}")
+                    rc = 0
+                    stdout_path = sample_logs_dir / f"{sample_name}.make_searchable.stdout.txt"
+                    stderr_path = sample_logs_dir / f"{sample_name}.make_searchable.stderr.txt"
+                    cmd_str = " ".join(map(sh_quote, cmd))
+                else:
+                    rc, stdout_path, stderr_path, cmd_str = run_command(
+                        cmd=cmd,
+                        workdir=logs_root,
+                        logs_dir=sample_logs_dir,
+                        stage="make_searchable",
+                        sample_name=sample_name,
+                    )
+
+                all_results.append(StageResult("make_searchable", sample_dir, rc == 0, stdout_path, stderr_path, rc, cmd_str, None))
+
+                if rc != 0 and not args.continue_on_error:
+                    raise RuntimeError(f"make_searchable failed (rc={rc})")
+
+            except Exception as ex:
+                eprint(f"[ERROR] {sample_name} {stage}: {ex}")
+                if not args.continue_on_error:
+                    raise
+            finally:
+                pbar.update(1)
 
     finally:
         pbar.close()
