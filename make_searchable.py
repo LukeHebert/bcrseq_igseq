@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 '''This script takes IgBLAST annotations that have been appended with B cell
 lineage (cluster) assignments and creates a FASTA file usable as a search 
 database for mapping Ig-seq peptide sequences to their respective lineages.
@@ -108,7 +109,7 @@ def extend_sequence(row, extensions, output_handle):
         logging.warning(f"fwr4_aa not found in sequence_aa for row with bcrseq_id {row['bcrseq_id']}")
 
 def process_tsv_to_fasta(tsv_path, extensions, logfile):
-    df = pd.read_csv(tsv_path, sep='\t')
+    df = pd.read_csv(tsv_path, sep='\t', low_memory=False)
     unique_sequences = collapse_and_deduplicate(df)
     
     # Generate bcrseq_id for each unique sequence
