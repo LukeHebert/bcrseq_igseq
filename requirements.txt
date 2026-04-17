@@ -1,0 +1,19 @@
+# Core table processing
+pandas>=2.2,<3
+numpy>=2.0,<3
+
+# Bioinformatics parsing / sequence utilities
+biopython>=1.85,<2
+python-Levenshtein>=0.27,<1
+rapidfuzz>=3.13,<4
+
+# Statistics, clustering, and plotting
+scipy>=1.15,<2
+matplotlib>=3.10,<4
+seaborn>=0.13,<1
+statsmodels>=0.14,<1
+logomaker>=0.8.7,<1
+
+# Pipeline/runtime conveniences
+PyYAML>=6,<7
+tqdm>=4.67,<5

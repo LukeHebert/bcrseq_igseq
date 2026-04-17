@@ -5,3 +5,15 @@ cdr3_hydro.py
 cdr3_aa_distro.py
 heatmap_tsv.py
 CDR3_Clonotyping
+
+# Python virtual environments and caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.python_packages/
+.python_packages_*/
+.matplotlib-cache/
+.cache/
