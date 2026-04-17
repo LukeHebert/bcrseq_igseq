@@ -1,9 +1,5 @@
 # BCR Transcript Sequencing and Immunoglobulin Protein Sequencing Pipeline
 
-- An in-depth README.md file is pending.
-
-- The scripts available here are stable if not perfect and there are many downstream scripts to come (see the TODO.md file for examples)
-
 ## Python environment
 
 This project now uses a standard Python virtual environment plus
@@ -20,7 +16,23 @@ python -m pip install -r requirements.txt
 
 Then run scripts with the activated environment's `python`.
 
-## Conceptual workflow
+## BCR-seq Transcript Analysis
+
+```mermaid
+flowchart LR
+    A[Sample FASTQ files] --> B[trim_merge.py]
+    B --> C[Trimmed and merged reads]
+    C --> D[identify_genes.py]
+    D --> E[IgBLAST-annotated BCRseq TSV]
+    E --> F[filter_collapse.py]
+    F --> G[Filtered collapsed BCRseq records]
+    G --> H[cluster.py]
+    H --> I[Clustered BCRseq annotation TSV]
+    I --> J[make_searchable.py]
+    J --> K[Complementary searchable FASTA database]
+```
+
+## Ig-seq Bottom-up Proteomic Analysis
 
 ```mermaid
 flowchart LR
@@ -34,5 +46,3 @@ flowchart LR
     G --> H[Lineage abundance plots and TSVs]
     G --> I[Per-lineage logo and coverage plots with TSVs]
 ```
-
-![Walkthrough of analysis workflow](Diagram_BCRseq_SingleChain_Analysis.png)
