@@ -26,14 +26,14 @@ Then run scripts with the activated environment's `python`.
 | --- | --- |
 | BCR-seq Transcript Analysis | `workflows/bcrseq_transcript/bcrseq_pipeline.py`, `workflows/bcrseq_transcript/pipeline_config_template.json` |
 | Ig-seq Bottom-up Proteomic Analysis | `workflows/igseq_proteomics/filter_psms.py`, `workflows/igseq_proteomics/quantify_map_peptides.py`, `workflows/igseq_proteomics/plot_lineage_repertoire.py` |
-| Secondary analysis utilities | `scripts/analysis_utils/` |
+| Secondary analysis utilities | `analysis_utils/` |
 
 Repository layout:
 
 - `workflows/bcrseq_transcript/` contains the transcript-side pipeline entrypoints and stage scripts.
 - `workflows/igseq_proteomics/` contains the proteomics-side filtering, mapping, and plotting scripts.
 - `examples/` contains example configs, example commands, and fixture inputs for onboarding.
-- `scripts/analysis_utils/` contains secondary helper scripts that are not the main onboarding entrypoints.
+- `analysis_utils/` contains secondary helper scripts that are not the main onboarding entrypoints.
 
 ## BCR-seq Transcript Analysis
 
