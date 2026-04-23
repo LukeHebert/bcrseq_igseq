@@ -6,7 +6,7 @@ The output from this script will be a TSV file similar to the input file, but
 now including cluster (estimated clonal lineage) assignments.
 
 USAGE:
-python cluster.py --help
+python legacy_cluster.py --help
 '''
 
 import argparse
