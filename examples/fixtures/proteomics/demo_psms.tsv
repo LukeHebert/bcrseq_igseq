@@ -1,0 +1,4 @@
+Annotated Sequence	Protein Accessions	Spectrum File	First Scan	Percolator PEP	XCorr	Rank	Search Engine Rank	Precursor Abundance	DeltaM [ppm]
+K.CARDRSTGYYAMDYW.R	BCRseq_demo_101_heavy_CARDRSTGYYAMDYW_GGYPGDG_SGY_IGHV1-2*01_IGHJ4*02_IGHGDEMO	demo_injection_A.raw	100	0.001	2.5	1	1	1000	1.2
+K.CARDRSTGYYAMDYW.R	BCRseq_demo_101_heavy_CARDRSTGYYAMDYW_GGYPGDG_SGY_IGHV1-2*01_IGHJ4*02_IGHGDEMO	demo_injection_A.raw	100	0.020	2.0	2	2	900	3.5
+K.CARDRSTGYYAMDYW.R	BCRseq_demo_101_heavy_CARDRSTGYYAMDYW_GGYPGDG_SGY_IGHV1-2*01_IGHJ4*02_IGHGDEMO	demo_injection_B.raw	100	0.002	2.3	1	1	500	0.8

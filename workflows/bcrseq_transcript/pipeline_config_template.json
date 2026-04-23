@@ -39,7 +39,7 @@
       "enabled": true,
       "args": ["--threshold", "2"]
     },
-    "gupta_cluster": {
+    "cluster": {
       "enabled": true,
       "args": ["--auto_threshold"]
     },

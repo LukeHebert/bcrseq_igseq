@@ -9,7 +9,7 @@ It can run any/all of these stages (in order):
 1) trim_merge.py
 2) identify_genes.py
 3) filter_collapse.py
-4) cluster.py
+4) gupta_cluster.py
 5) make_searchable.py
 
 Inputs:
@@ -31,7 +31,7 @@ Example:
 Behavior change when --annotate_isotype_tissue is set:
 - isotype/tissue_type columns are added after filter_collapse (to the filtered TSV)
 - all (annotated) filtered TSVs are concatenated into one combined dataset
-- clustering is run once on the combined dataset (cluster.py by default)
+- clustering is run once on the combined dataset (gupta_cluster.py by default)
 """
 
 from __future__ import annotations
@@ -142,12 +142,19 @@ def get_stage_args(cfg: Dict[str, Any], stage: str) -> List[str]:
     return [str(a) for a in args]
 
 
-def get_stage_script(cfg: Dict[str, Any], stage: str) -> Path:
+def resolve_config_relative_path(path_value: str | Path, config_path: Path) -> Path:
+    path = Path(path_value).expanduser()
+    if path.is_absolute():
+        return path
+    return (config_path.parent / path).resolve()
+
+
+def get_stage_script(cfg: Dict[str, Any], stage: str, config_path: Path) -> Path:
     scripts = cfg.get("scripts", {})
     p = scripts.get(stage)
     if not p:
         raise ValueError(f'Config missing scripts["{stage}"] path.')
-    return Path(p).expanduser()
+    return resolve_config_relative_path(p, config_path)
 
 
 def list_sample_dirs(parent_dir: Path) -> List[Path]:
@@ -319,7 +326,10 @@ def main() -> None:
 
     cfg = load_config(config_path)
 
-    logs_root = Path(cfg.get("logs_dir", parent_dir / "pipeline_logs")).expanduser()
+    if "logs_dir" in cfg:
+        logs_root = resolve_config_relative_path(cfg["logs_dir"], config_path)
+    else:
+        logs_root = parent_dir / "pipeline_logs"
     logs_root.mkdir(parents=True, exist_ok=True)
 
     sample_dirs = list_sample_dirs(parent_dir)
@@ -342,7 +352,7 @@ def main() -> None:
     all_results: List[StageResult] = []
 
     # Resolve scripts once
-    scripts = {stage: get_stage_script(cfg, stage) for stage in STAGES_ORDER}
+    scripts = {stage: get_stage_script(cfg, stage, config_path) for stage in STAGES_ORDER}
 
     # Progress units: per-sample stages up to filter_collapse run per sample, then global stages once
     per_sample_stages = []
@@ -556,15 +566,7 @@ def main() -> None:
                     concatenate_tsvs(filtered_inputs, combined_filtered)
 
                 cluster_args = get_stage_args(cfg, "cluster")
-                if not cluster_args:
-                    raise ValueError(
-                        'Config "stages.cluster.args" must include at least the clustering_executable path '
-                        "(the second positional arg to cluster.py)."
-                    )
-                clustering_executable = cluster_args[0]
-                extra_cluster_args = cluster_args[1:]
-
-                cmd = [sys.executable, str(scripts["cluster"]), str(combined_filtered), str(clustering_executable)] + extra_cluster_args
+                cmd = [sys.executable, str(scripts["cluster"]), str(combined_filtered)] + cluster_args
 
                 if args.dry_run:
                     print(f"[DRY RUN] {sample_name} cluster: {' '.join(map(sh_quote, cmd))}")
@@ -582,7 +584,7 @@ def main() -> None:
                     )
 
                 if rc == 0:
-                    # cluster.py writes <input>_clustered.tsv
+                    # gupta_cluster.py writes <input>_clustered.tsv
                     combined_clustered = combined_filtered.with_suffix("").with_name(combined_filtered.stem + "_clustered.tsv")
                     if not combined_clustered.exists():
                         matches = sorted(logs_root.glob(combined_filtered.stem + "*_clustered.tsv"))
@@ -616,7 +618,7 @@ def main() -> None:
                 if extensions_txt is None:
                     raise ValueError('Config must include "make_searchable_extensions_txt" path to the extensions .txt file.')
 
-                ext_path = Path(extensions_txt).expanduser()
+                ext_path = resolve_config_relative_path(extensions_txt, config_path)
                 if not ext_path.exists():
                     raise FileNotFoundError(f"Extensions txt not found: {ext_path}")
 

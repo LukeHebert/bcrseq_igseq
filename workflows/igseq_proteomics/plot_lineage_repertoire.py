@@ -94,9 +94,9 @@ def require_logomaker():
         import logomaker  # type: ignore
     except ModuleNotFoundError as exc:
         raise RuntimeError(
-            "plot_lineage_repertoire.py now requires the 'logomaker' package for "
-            "letter-based sequence logos. Install/update the conda environment "
-            "from environment.yml or run: conda install -c conda-forge logomaker"
+            "plot_lineage_repertoire.py requires the 'logomaker' package for "
+            "letter-based sequence logos. Install project dependencies from "
+            "requirements.txt or install logomaker into your active Python environment."
         ) from exc
     return logomaker
 

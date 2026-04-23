@@ -1,0 +1,39 @@
+{
+  "logs_dir": "../../scratch/transcript_dry_run_logs",
+  "scripts": {
+    "trim_merge": "../../workflows/bcrseq_transcript/trim_merge.py",
+    "identify_genes": "../../workflows/bcrseq_transcript/identify_genes.py",
+    "filter_collapse": "../../workflows/bcrseq_transcript/filter_collapse.py",
+    "cluster": "../../workflows/bcrseq_transcript/gupta_cluster.py",
+    "make_searchable": "../../workflows/bcrseq_transcript/make_searchable.py"
+  },
+  "make_searchable_extensions_txt": "../../workflows/bcrseq_transcript/extensions_all.txt",
+  "inputs": {
+    "trim_merge": {
+      "r1_regex": ".*_R1\\.fastq$",
+      "r2_regex": ".*_R2\\.fastq$"
+    }
+  },
+  "stages": {
+    "trim_merge": {
+      "enabled": true,
+      "args": ["--notrim"]
+    },
+    "identify_genes": {
+      "enabled": false,
+      "args": ["human", "--tool", "igblast"]
+    },
+    "filter_collapse": {
+      "enabled": false,
+      "args": ["--threshold", "2"]
+    },
+    "cluster": {
+      "enabled": false,
+      "args": ["--auto_threshold"]
+    },
+    "make_searchable": {
+      "enabled": false,
+      "args": []
+    }
+  }
+}
