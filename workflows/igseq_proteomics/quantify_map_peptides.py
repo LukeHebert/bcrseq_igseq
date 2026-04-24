@@ -104,18 +104,41 @@ def summarize_filtered_psms(psm: pd.DataFrame) -> pd.DataFrame:
     psm["dm_num"] = to_number(psm["DeltaM [ppm]"]) if "DeltaM [ppm]" in psm.columns else pd.NA
     psm["scan_key"] = psm["Spectrum File"].astype(str) + ":" + psm["First Scan"].astype(str)
 
-    inj = (
+    abundance_by_injection = (
         psm.groupby(["peptide_sequence", "cluster_id", "Spectrum File"], dropna=False)["psm_abundance_num"]
         .sum()
         .reset_index()
     )
-    inj["injection_pair"] = inj.apply(
+    abundance_by_injection["injection_pair"] = abundance_by_injection.apply(
         lambda r: f"{r['Spectrum File']}={r['psm_abundance_num']:.6g}", axis=1
     )
-    inj_summary = (
-        inj.groupby(["peptide_sequence", "cluster_id"], dropna=False)["injection_pair"]
+    inj_abundance_summary = (
+        abundance_by_injection.groupby(["peptide_sequence", "cluster_id"], dropna=False)["injection_pair"]
         .agg(lambda xs: "; ".join(xs))
-        .rename("per_injection_abundance")
+        .rename("peptide_abundance_by_injection")
+        .reset_index()
+    )
+    avg_abundance_summary = (
+        abundance_by_injection.groupby(["peptide_sequence", "cluster_id"], dropna=False)
+        .agg(avg_abundance_per_injection=("psm_abundance_num", "mean"))
+        .reset_index()
+    )
+
+    psm_count_by_injection = (
+        psm.groupby(["peptide_sequence", "cluster_id", "Spectrum File"], dropna=False)
+        .size()
+        .reset_index(name="psm_count_injection")
+    )
+    psm_count_by_injection["injection_pair"] = psm_count_by_injection.apply(
+        lambda r: f"{r['Spectrum File']}={int(r['psm_count_injection'])}", axis=1
+    )
+    inj_psm_summary = (
+        psm_count_by_injection.groupby(["peptide_sequence", "cluster_id"], dropna=False)
+        .agg(
+            psm_count_by_injection=("injection_pair", lambda xs: "; ".join(xs)),
+            n_injections_observed=("Spectrum File", "nunique"),
+            avg_psm_per_injection=("psm_count_injection", "mean"),
+        )
         .reset_index()
     )
 
@@ -123,7 +146,9 @@ def summarize_filtered_psms(psm: pd.DataFrame) -> pd.DataFrame:
         psm.groupby(["peptide_sequence", "peptide_sequence_il_norm", "cluster_id"], dropna=False)
         .agg(
             peptide_abundance=("psm_abundance_num", "sum"),
+            peptide_abundance_total=("psm_abundance_num", "sum"),
             psm_count=("psm_abundance_num", "size"),
+            psm_count_total=("psm_abundance_num", "size"),
             scan_count=("scan_key", "nunique"),
             accession_list_str=("accession_list_str", unique_join),
             spectrum_files=("Spectrum File", lambda s: "; ".join(sorted(set(s.dropna().astype(str))))),
@@ -133,7 +158,11 @@ def summarize_filtered_psms(psm: pd.DataFrame) -> pd.DataFrame:
         )
         .reset_index()
     )
-    return grouped.merge(inj_summary, on=["peptide_sequence", "cluster_id"], how="left")
+    grouped = grouped.merge(inj_abundance_summary, on=["peptide_sequence", "cluster_id"], how="left")
+    grouped["per_injection_abundance"] = grouped["peptide_abundance_by_injection"]
+    grouped = grouped.merge(avg_abundance_summary, on=["peptide_sequence", "cluster_id"], how="left")
+    grouped = grouped.merge(inj_psm_summary, on=["peptide_sequence", "cluster_id"], how="left")
+    return grouped
 
 
 def parse_bcrseq_data(bcrseq: pd.DataFrame, suffix: str, known_suffixes: set[str]) -> pd.DataFrame:
@@ -264,10 +293,22 @@ def main() -> None:
         "suffix_txt": str(suffix_path),
         "longest_suffix": longest_suffix,
         "input_psm_rows": int(len(psm)),
+        "unique_spectrum_files": int(psm["Spectrum File"].dropna().astype(str).nunique()),
         "unique_peptides": int(len(peptide_summary)),
         "mapped_rows": int(len(mapped)),
         "matched_rows": int(mapped["match_found"].sum()) if "match_found" in mapped.columns else 0,
         "peptide_abundance_sum": float(peptide_summary["peptide_abundance"].sum()) if "peptide_abundance" in peptide_summary.columns else 0.0,
+        "avg_abundance_per_injection_summary": {
+            "min": float(peptide_summary["avg_abundance_per_injection"].min()) if "avg_abundance_per_injection" in peptide_summary.columns else 0.0,
+            "median": float(peptide_summary["avg_abundance_per_injection"].median()) if "avg_abundance_per_injection" in peptide_summary.columns else 0.0,
+            "max": float(peptide_summary["avg_abundance_per_injection"].max()) if "avg_abundance_per_injection" in peptide_summary.columns else 0.0,
+        },
+        "psm_count_total_sum": int(peptide_summary["psm_count_total"].sum()) if "psm_count_total" in peptide_summary.columns else 0,
+        "avg_psm_per_injection_summary": {
+            "min": float(peptide_summary["avg_psm_per_injection"].min()) if "avg_psm_per_injection" in peptide_summary.columns else 0.0,
+            "median": float(peptide_summary["avg_psm_per_injection"].median()) if "avg_psm_per_injection" in peptide_summary.columns else 0.0,
+            "max": float(peptide_summary["avg_psm_per_injection"].max()) if "avg_psm_per_injection" in peptide_summary.columns else 0.0,
+        },
         "outputs": {"quantified_peptides": str(peptide_path), "mapped_peptides": str(mapped_path)},
     }
     log_path = out_dir / f"{stem}_quantify_map_log_{timestamp()}.json"
