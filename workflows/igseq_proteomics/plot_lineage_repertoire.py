@@ -27,6 +27,10 @@ LOGO_FIGURE_HEIGHT = 4.5
 LOGO_COVERAGE_HEIGHT_RATIO = 1.2
 LOGO_SEQUENCE_HEIGHT_RATIO = 1.7
 METRIC_CHOICES = ["abundance_total", "abundance_average", "psm_total", "psm_average"]
+REGION_BOUNDARY_COLOR = "#2F4F4F"
+REGION_BOUNDARY_LINEWIDTH = 1.2
+REGION_LABEL_FONTSIZE = 10
+LOGO_MEMBER_COUNT_FONTSIZE = 10
 
 
 def timestamp() -> str:
@@ -485,6 +489,15 @@ def plot_lineage_detail(
     logomaker.Logo(logo_matrix, ax=axes[1])
     axes[1].set_ylabel("AA frequency")
     axes[1].set_xlabel("Aligned residue position")
+    axes[1].text(
+        0.01,
+        1.02,
+        f"BCR-seq sequences in logo: {len(member_order)}",
+        transform=axes[1].transAxes,
+        ha="left",
+        va="bottom",
+        fontsize=LOGO_MEMBER_COUNT_FONTSIZE,
+    )
     tick_step = max(1, aligned_width // 20)
     tick_positions = list(range(1, aligned_width + 1, tick_step))
     axes[1].set_xticks(tick_positions)
@@ -496,7 +509,26 @@ def plot_lineage_detail(
             continue
         axes[0].axvspan(span["start"] + 0.5, span["end"] + 0.5, alpha=0.08, color="#54A24B")
         mid = (span["start"] + span["end"] + 1) / 2
-        axes[0].text(mid, ymax, span["region"].replace("_aa", "").upper(), ha="center", va="top", fontsize=8)
+        axes[0].text(
+            mid,
+            ymax,
+            span["region"].replace("_aa", "").upper(),
+            ha="center",
+            va="top",
+            fontsize=REGION_LABEL_FONTSIZE,
+        )
+        axes[0].axvline(
+            span["start"] + 0.5,
+            color=REGION_BOUNDARY_COLOR,
+            linewidth=REGION_BOUNDARY_LINEWIDTH,
+            alpha=0.9,
+        )
+        axes[0].axvline(
+            span["end"] + 0.5,
+            color=REGION_BOUNDARY_COLOR,
+            linewidth=REGION_BOUNDARY_LINEWIDTH,
+            alpha=0.9,
+        )
     axes[0].set_ylim(0, ymax * 1.15)
     axes[0].set_xlim(0.5, aligned_width + 0.5)
 
