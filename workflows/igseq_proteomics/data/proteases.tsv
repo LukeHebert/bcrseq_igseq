@@ -1,0 +1,19 @@
+short_name	long_name	P4	P3	P2	P1	P1'	P2'
+ProAlanase	ProAlanase					P;A
+Asp-N endopep	Asp-N endopeptidase					D
+Neutrophil elastase	Human neutrophil elastase				A;V
+Trypsin	Trypsin				K;R	0P
+Trypsin	Trypsin			W	K	P
+Trypsin	Trypsin			M	R	P
+ProAlanase_Trypsin	ProAlanase plus Trypsin					P;A
+ProAlanase_Trypsin	ProAlanase plus Trypsin				K;R	0P
+ProAlanase_Trypsin	ProAlanase plus Trypsin			W	K	P
+ProAlanase_Trypsin	ProAlanase plus Trypsin			M	R	P
+Asp-N_Trypsin	Asp-N plus Trypsin					D
+Asp-N_Trypsin	Asp-N plus Trypsin				K;R	0P
+Asp-N_Trypsin	Asp-N plus Trypsin			W	K	P
+Asp-N_Trypsin	Asp-N plus Trypsin			M	R	P
+hNE_Trypsin	Human neutrophil elastase plus Trypsin				A;V
+hNE_Trypsin	Human neutrophil elastase plus Trypsin				K;R	0P
+hNE_Trypsin	Human neutrophil elastase plus Trypsin			W	K	P
+hNE_Trypsin	Human neutrophil elastase plus Trypsin			M	R	P

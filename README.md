@@ -25,7 +25,7 @@ Then run scripts with the activated environment's `python`.
 | Workflow | Official entry files |
 | --- | --- |
 | BCR-seq Transcript Analysis | `workflows/bcrseq_transcript/bcrseq_pipeline.py`, `workflows/bcrseq_transcript/pipeline_config_template.json` |
-| Ig-seq Bottom-up Proteomic Analysis | `workflows/igseq_proteomics/filter_psms.py`, `workflows/igseq_proteomics/quantify_map_peptides.py`, `workflows/igseq_proteomics/plot_lineage_repertoire.py`, `workflows/igseq_proteomics/compare_cdr_lineage_abundance.py` |
+| Ig-seq Bottom-up Proteomic Analysis | `workflows/igseq_proteomics/filter_psms.py`, `workflows/igseq_proteomics/quantify_map_peptides.py`, `workflows/igseq_proteomics/plot_lineage_repertoire.py`, `workflows/igseq_proteomics/compare_cdr_lineage_abundance.py`, `workflows/igseq_proteomics/simulate_protease_digestion.py` |
 | Secondary analysis utilities | `analysis_utils/` |
 
 Repository layout:
@@ -79,6 +79,8 @@ flowchart TD
     G --> H[Lineage abundance plots and TSVs]
     G --> I[Per-lineage logo and coverage plots with TSVs]
     J --> K[CDR-derived lineage-abundance comparison TSVs and plots]
+    E --> L[workflows/igseq_proteomics/simulate_protease_digestion.py]
+    L --> M[Protease-selection TSVs and CDR3 digestion plots]
 ```
 
 Start here if you already have a Proteome Discoverer PSM export and a clustered BCRseq annotation TSV.
@@ -117,6 +119,12 @@ python workflows/igseq_proteomics/compare_cdr_lineage_abundance.py \
 - All peptides: every successfully mapped peptide.
 
 The script writes one five-selection lineage-abundance table, a seven-comparison summary, one lineage and top-N membership table per comparison, and a log-log scatterplot for comparisons with at least two lineages detected by both methods. It uses total precursor abundance and counts each `(ClusterID, peptide_sequence)` only once.
+
+### In-silico protease digestion
+
+`simulate_protease_digestion.py` takes an AIRR/IgBLAST heavy-chain TSV with `fwr3_aa`, `cdr3_aa`, `fwr4_aa`, and positive integer `nt_seq_count` columns. It uses the bundled `workflows/igseq_proteomics/data/proteases.tsv` rule table unless `--protease-rules` is supplied.
+
+Run `python workflows/igseq_proteomics/simulate_protease_digestion.py examples/fixtures/proteomics/demo_protease_airr.tsv`. By default, results are written to a timestamped `protease_simulation/` directory beside the input. Each run writes a per-sequence detail TSV, a weighted per-protease summary TSV, and weighted histograms of upstream and downstream CDR3 cut distances plus CDR3-spanning peptide lengths. Use `--out-dir` to choose a different output directory.
 
 ## Examples and fixtures
 
