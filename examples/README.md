@@ -51,3 +51,9 @@ python workflows/igseq_proteomics/compare_cdr_lineage_abundance.py \
 ```
 
 The final command compares CDR1-only, CDR2-only, combined CDR1/CDR2, CDR3, and all-peptide lineage estimates. By default, it requires at least three amino acids of CDR overlap and compares the top 10 lineages for each method. It writes separate abundance, comparison, top-lineage membership, and available scatterplot outputs under `04_cdr_comparison`.
+
+
+
+## Protease-simulation example
+
+Run `python workflows/igseq_proteomics/simulate_protease_digestion.py examples/fixtures/proteomics/demo_protease_airr.tsv`. This AIRR/IgBLAST-style heavy-chain fixture contains `fwr3_aa`, `cdr3_aa`, `fwr4_aa`, and positive integer `nt_seq_count` columns. Results are written to a timestamped `protease_simulation/` directory beside the fixture.
