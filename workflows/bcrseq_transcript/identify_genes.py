@@ -96,7 +96,7 @@ def call_MiXCR(infile, species, left, right, nano, log_file_name, output_dir):
     
     return '\n\n'.join([command1, command2])
 
-def call_igblast(infile, species, log_file_name, output_dir):
+def call_igblast(infile, species, log_file_name, output_dir, include_c_region=False):
     """ Calls BLAST-based NCBI tool IgBLAST for mapping and annotating gene 
     elements from BCR mRNA sequences."""
     
@@ -126,12 +126,16 @@ def call_igblast(infile, species, log_file_name, output_dir):
                 'ncbi-igblast-1.21.0/bin/igblastn')
     # Use the directory of the input file for the final TSV output
     input_dir = os.path.dirname(os.path.abspath(infile))
+    c_region_arg = (
+        f"-c_region_db internal_data/{species}/{species}_C "
+        if include_c_region else ""
+    )
     command = (f"cd {igblast_dir}; "
                f"{igblastn} "
                f"-germline_db_V internal_data/{species}/{species}_V "
                f"-germline_db_J internal_data/{species}/{species}_J "
                f"-germline_db_D internal_data/{species}/{species}_D "
-               f"-c_region_db internal_data/{species}/{species}_C "
+               f"{c_region_arg}"
                f"-auxiliary_data optional_file/{species}_gl.aux "
                f"-organism {species} "
                f"-query {infasta} "
@@ -141,7 +145,7 @@ def call_igblast(infile, species, log_file_name, output_dir):
                f"2>&1 | tee -a {log_file_name} "
                f"2>/dev/null")
     print('\tCalling IgBLAST...')
-    subprocess.run(command, shell=True, check=True)
+    subprocess.run(["bash", "-o", "pipefail", "-c", command], check=True)
     return command
 
 def time_passed(start_time):
@@ -166,6 +170,9 @@ def parse_arguments():
     parser.add_argument("-t", "--tool", default="igblast", 
         choices=["mixcr", "igblast"], help=("Software that performs the gene "
         "mapping and annotations."))
+    parser.add_argument('--include_c_region', action='store_true',
+        help=('Include IgBLAST constant-region annotation. Disabled by default '
+              'because it requires a species-specific C-region reference database.'))
     
     # MiXCR-specific optional arguments
     parser.add_argument('--leftbound', type=str, default='FR1Begin', 
@@ -198,7 +205,9 @@ def main(args):
         args_str = call_MiXCR(args.reads, args.sp, args.leftbound, 
             args.rightbound, args.nanopore, log_path, output_dir)
     elif args.tool == 'igblast':
-        args_str = call_igblast(args.reads, args.sp, log_path, output_dir)
+        args_str = call_igblast(
+            args.reads, args.sp, log_path, output_dir, args.include_c_region
+        )
     else:
         print('Invalid mapping tool name was used as a -t/--tool argument.')
         exit()
