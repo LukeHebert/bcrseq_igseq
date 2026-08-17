@@ -28,6 +28,10 @@ from scipy.spatial.distance import pdist
 from scipy.stats import gaussian_kde
 import matplotlib.pyplot as plt
 
+
+GROUP_COLUMNS = ['v_gene', 'j_gene', 'cdr3_aa_length']
+SEQUENCE_COLUMNS = GROUP_COLUMNS + ['cdr3_aa']
+
 def parse_arguments():
     """Parse and return command-line arguments."""
     parser = argparse.ArgumentParser(
@@ -73,6 +77,28 @@ def hamming_distance(seq1, seq2):
     """
     return sum(ch1 != ch2 for ch1, ch2 in zip(seq1, seq2))
 
+def add_grouping_columns(df):
+    """Add the V/J/length fields used to define independent clone groups."""
+    df = df.copy()
+    df['v_gene'] = df['v_call'].apply(extract_gene)
+    df['j_gene'] = df['j_call'].apply(extract_gene)
+    df['cdr3_aa_length'] = df['cdr3_aa'].apply(
+        lambda value: len(value) if pd.notnull(value) else 0
+    )
+    return df
+
+
+def unique_cdr3_sequences(df):
+    """Return one representative of each CDR3 amino-acid sequence per clone group."""
+    return df.loc[:, SEQUENCE_COLUMNS].drop_duplicates().copy()
+
+
+def pairwise_comparisons(df):
+    """Count the within-group pairwise distances required for clustering."""
+    sizes = df.groupby(GROUP_COLUMNS).size()
+    return int((sizes * (sizes - 1) // 2).sum())
+
+
 def cluster_group(seqs, threshold):
     """
     Given a list of CDRH3 amino acid sequences (all the same length),
@@ -94,13 +120,14 @@ def cluster_group(seqs, threshold):
     clusters = fcluster(Z, t=threshold, criterion='distance')
     return clusters
 
-def compute_auto_threshold(df, clustering_dir, log_file):
+def compute_auto_threshold(unique_sequences, clustering_dir, log_file):
     """
     Automatically determine the Hamming distance threshold based on the 
     "distance-to-nearest" distribution.
     
     For each group (defined by same V gene, J gene, and CDRH3 amino acid length)
-    with at least two sequences, compute the minimum (nearest neighbor) Hamming distance.
+    with at least two distinct CDRH3 amino-acid sequences, compute the minimum
+    (nearest neighbor) Hamming distance.
     Pool these distances, estimate a kernel density (KDE) using a Gaussian kernel,
     then compute the first and second derivatives of the KDE.
     The threshold is selected as the first grid point after the main peak where the first derivative
@@ -108,7 +135,7 @@ def compute_auto_threshold(df, clustering_dir, log_file):
     A PNG visualization (dpi=600) is saved to the 'clustering/' subdirectory.
     """
     distances = []
-    groups = df.groupby(['v_gene', 'j_gene', 'cdr3_aa_length'])
+    groups = unique_sequences.groupby(GROUP_COLUMNS)
     for name, group in groups:
         if len(group) < 2:
             continue
@@ -175,21 +202,31 @@ def perform_clustering(df, threshold, log_file):
     It is assumed that the DataFrame already contains 'v_gene', 'j_gene',
     and 'cdr3_aa_length' columns.
     """
-    groups = df.groupby(['v_gene', 'j_gene', 'cdr3_aa_length'])
+    unique_sequences = unique_cdr3_sequences(df)
+    groups = unique_sequences.groupby(GROUP_COLUMNS)
     log_file.write(f"Number of groups to cluster: {len(groups)}\n")
-    
-    df['ClusterID'] = np.nan
+    log_file.write(f"Distinct CDR3 amino-acid sequences to cluster: {len(unique_sequences)}\n")
+
+    assignments = []
     global_cluster_id = 1
-    
+
     for name, group in groups:
-        indices = group.index
         seqs = group['cdr3_aa'].tolist()
         clusters = cluster_group(seqs, threshold)
         clusters_global = clusters + global_cluster_id - 1
-        df.loc[indices, 'ClusterID'] = clusters_global
+        assignments.append(group.assign(ClusterID=clusters_global))
         global_cluster_id += clusters.max()
-    df['ClusterID'] = df['ClusterID'].astype(int)
-    return df
+
+    clustered_unique = pd.concat(assignments, ignore_index=True)
+    clustered_df = df.merge(
+        clustered_unique,
+        on=SEQUENCE_COLUMNS,
+        how='left',
+        validate='many_to_one',
+        sort=False,
+    )
+    clustered_df['ClusterID'] = clustered_df['ClusterID'].astype(int)
+    return clustered_df
 
 def main():
     """Main function that orchestrates the clustering process."""
@@ -203,14 +240,22 @@ def main():
         df = pd.read_csv(args.annotation_tsv, sep='\t')
         log_file.write(f"Initial row count: {len(df)}\n")
         
-        # Preprocess: add v_gene, j_gene, and cdr3_aa_length columns.
-        df['v_gene'] = df['v_call'].apply(extract_gene)
-        df['j_gene'] = df['j_call'].apply(extract_gene)
-        df['cdr3_aa_length'] = df['cdr3_aa'].apply(lambda x: len(x) if pd.notnull(x) else 0)
+        # Preprocess and collapse synonymous nucleotide sequences for clustering only.
+        df = add_grouping_columns(df)
+        unique_sequences = unique_cdr3_sequences(df)
+        original_pairs = pairwise_comparisons(df)
+        unique_pairs = pairwise_comparisons(unique_sequences)
+        reduction = 0.0 if original_pairs == 0 else 100 * (1 - unique_pairs / original_pairs)
+        log_file.write(f"Distinct CDR3 amino-acid sequences: {len(unique_sequences)}\n")
+        log_file.write(
+            "Pairwise comparisons: "
+            f"{original_pairs} rows -> {unique_pairs} unique CDR3-aa "
+            f"({reduction:.2f}% reduction)\n"
+        )
         
         # Determine threshold.
         if args.auto_threshold:
-            threshold = compute_auto_threshold(df, clustering_dir, log_file)
+            threshold = compute_auto_threshold(unique_sequences, clustering_dir, log_file)
         elif args.threshold is not None:
             threshold = args.threshold
             log_file.write(f"Using user-specified threshold: {threshold}\n")
