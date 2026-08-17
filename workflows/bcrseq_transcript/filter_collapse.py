@@ -42,7 +42,8 @@ def determine_chain_type(df, log_file):
     """Determine whether the data is heavy or light chain by tallying gene call columns and logging the results."""
     heavy_tally = 0
     light_tally = 0
-    gene_cols = ['v_call', 'd_call', 'j_call', 'c_call']
+    # c_call is optional when IgBLAST runs without a C-region reference.
+    gene_cols = [col for col in ['v_call', 'd_call', 'j_call', 'c_call'] if col in df.columns]
     
     for col in gene_cols:
         calls = df[col].dropna().apply(lambda x: x.split(',')[0])

@@ -63,7 +63,8 @@ def determine_chain_type(df):
     heavy_tally = 0
     kappa_tally = 0
     lambda_tally = 0
-    gene_cols = ['v_call', 'd_call', 'j_call', 'c_call']
+    # c_call is optional when IgBLAST runs without a C-region reference.
+    gene_cols = [col for col in ['v_call', 'd_call', 'j_call', 'c_call'] if col in df.columns]
 
     for col in gene_cols:
         # Process each gene call: take the first comma-separated element

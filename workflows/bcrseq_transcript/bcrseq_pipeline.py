@@ -216,6 +216,18 @@ def find_single_input(sample_dir: Path, glob_pattern: str) -> Path:
     return matches[0]
 
 
+def projected_trim_merge_output(r1: Path) -> Path:
+    """Return the assembled FASTQ path trim_merge.py would write for an R1 file."""
+    base = r1.name.replace("_trimmed.fastq.gz", "").replace("_R1", "")
+    return r1.parent / f"{base}.assembled.fastq"
+
+
+def projected_igblast_output(assembled_reads: Path) -> Path:
+    """Return the AIRR TSV path identify_genes.py would write with IgBLAST."""
+    fasta_name = assembled_reads.name.replace(".fastq", ".fasta")
+    return assembled_reads.parent / f"{Path(fasta_name).stem}_IgBLAST.tsv"
+
+
 def run_command(
     cmd: List[str],
     workdir: Path,
@@ -345,21 +357,28 @@ def main() -> None:
 
     assembled_glob = str(input_rules.get("identify_genes", {}).get("assembled_glob", "*.assembled.fastq"))
     annotated_glob = str(input_rules.get("filter_collapse", {}).get("annotated_tsv_glob", "*_IgBLAST.tsv"))
+    combine_before_filter = ensure_bool(
+        input_rules.get("filter_collapse", {}).get("combine_before_filter", False)
+    )
     filtered_glob = str(input_rules.get("cluster", {}).get("filtered_tsv_glob", "*_filtered.tsv"))
     clustered_glob = str(input_rules.get("make_searchable", {}).get("clustered_tsv_glob", "*_clustered.tsv"))
     extensions_txt = cfg.get("make_searchable_extensions_txt", None)
 
     all_results: List[StageResult] = []
+    had_exceptions = False
 
     # Resolve scripts once
     scripts = {stage: get_stage_script(cfg, stage, config_path) for stage in STAGES_ORDER}
 
-    # Progress units: per-sample stages up to filter_collapse run per sample, then global stages once
+    # Per-sample stages run first. Optionally, annotated TSVs can be combined and
+    # filtered once before clustering (for multiple libraries from one donor).
     per_sample_stages = []
     for stage in STAGES_ORDER[start_idx:]:
         if not stage_enabled(cfg, stage):
             continue
-        if stage in ["trim_merge", "identify_genes", "filter_collapse"]:
+        if stage in ["trim_merge", "identify_genes"]:
+            per_sample_stages.append(stage)
+        elif stage == "filter_collapse" and not combine_before_filter:
             per_sample_stages.append(stage)
 
     global_stages = []
@@ -368,12 +387,19 @@ def main() -> None:
             continue
         if stage in ["cluster", "make_searchable"]:
             global_stages.append(stage)
+    if (
+        combine_before_filter
+        and start_idx <= STAGES_ORDER.index("filter_collapse")
+        and stage_enabled(cfg, "filter_collapse")
+    ):
+        global_stages.insert(0, "combine_filter")
 
     total_units = len(sample_dirs) * len(per_sample_stages) + len(global_stages)
     total_units = max(1, total_units)
     pbar = tqdm(total=total_units, unit="stage", dynamic_ncols=True)
 
     produced_filtered_by_sample: Dict[str, Path] = {}
+    produced_annotated_by_sample: Dict[str, Path] = {}
 
     try:
         # Per-sample phases (up to filter_collapse)
@@ -401,6 +427,8 @@ def main() -> None:
                     continue
                 if not stage_enabled(cfg, stage):
                     continue
+                if stage == "filter_collapse" and combine_before_filter:
+                    continue
 
                 pbar.set_description(f"{sample_name}")
                 pbar.set_postfix_str(stage)
@@ -425,7 +453,9 @@ def main() -> None:
                                 stage="trim_merge",
                                 sample_name=sample_name,
                             )
-                        if rc == 0:
+                        if rc == 0 and args.dry_run:
+                            produced_assembled = projected_trim_merge_output(r1)
+                        elif rc == 0:
                             matches = sorted(sample_dir.glob("*.assembled.fastq"))
                             produced_assembled = matches[0] if matches else None
                         all_results.append(
@@ -454,12 +484,26 @@ def main() -> None:
                                 stage="identify_genes",
                                 sample_name=sample_name,
                             )
-                        if rc == 0:
+                        if rc == 0 and args.dry_run:
+                            if "--tool" in get_stage_args(cfg, "identify_genes"):
+                                tool_idx = get_stage_args(cfg, "identify_genes").index("--tool") + 1
+                                tool = get_stage_args(cfg, "identify_genes")[tool_idx]
+                            else:
+                                tool = "igblast"
+                            if tool == "igblast":
+                                produced_annotated = projected_igblast_output(produced_assembled)
+                            else:
+                                produced_annotated = produced_assembled.with_name(
+                                    produced_assembled.stem + "MiXCR.tsv"
+                                )
+                        elif rc == 0:
                             matches = sorted(sample_dir.glob("*_IgBLAST.tsv"))
                             produced_annotated = matches[0] if matches else None
                             if produced_annotated is None:
                                 matches2 = sorted(sample_dir.glob("*MiXCR.tsv"))
                                 produced_annotated = matches2[0] if matches2 else None
+                        if produced_annotated is not None:
+                            produced_annotated_by_sample[sample_name] = produced_annotated
                         all_results.append(
                             StageResult(
                                 "identify_genes",
@@ -498,7 +542,7 @@ def main() -> None:
                             )
                         if rc == 0:
                             produced_filtered = Path(str(produced_annotated).replace(".tsv", "_filtered.tsv"))
-                            if not produced_filtered.exists():
+                            if not args.dry_run and not produced_filtered.exists():
                                 matches = sorted(sample_dir.glob(filtered_glob))
                                 produced_filtered = matches[0] if matches else None
 
@@ -531,15 +575,77 @@ def main() -> None:
                         raise RuntimeError(f"Unknown stage: {stage}")
 
                 except Exception as ex:
+                    had_exceptions = True
                     eprint(f"[ERROR] {sample_name} {stage}: {ex}")
                     if not args.continue_on_error:
                         raise
                 finally:
                     pbar.update(1)
 
-        # Global phases (cluster, then make_searchable) run once on concatenated data
+        # Global phases run once after all requested per-sample work.
         combined_filtered: Optional[Path] = None
         combined_clustered: Optional[Path] = None
+
+        if "combine_filter" in global_stages:
+            stage = "combine_filter"
+            sample_name = "ALL_SAMPLES"
+            sample_dir = parent_dir
+            sample_logs_dir = logs_root / sample_name
+            sample_logs_dir.mkdir(parents=True, exist_ok=True)
+
+            pbar.set_description(sample_name)
+            pbar.set_postfix_str(stage)
+
+            try:
+                annotated_inputs = list(produced_annotated_by_sample.values())
+                if not annotated_inputs:
+                    annotated_inputs = [find_single_input(d, annotated_glob) for d in sample_dirs]
+                if len(annotated_inputs) != len(sample_dirs):
+                    raise RuntimeError(
+                        "Annotated TSVs are missing for one or more samples; "
+                        "refusing to combine and cluster an incomplete cohort."
+                    )
+
+                combined_annotated = logs_root / f"combined_annotated_{now_stamp()}.tsv"
+                combined_filtered = Path(str(combined_annotated).replace(".tsv", "_filtered.tsv"))
+                filter_args = get_stage_args(cfg, "filter_collapse")
+                cmd = [sys.executable, str(scripts["filter_collapse"]), str(combined_annotated)] + filter_args
+
+                if args.dry_run:
+                    print(
+                        f"[DRY RUN] {sample_name} concatenate annotations: "
+                        f"{len(annotated_inputs)} TSVs -> {combined_annotated}"
+                    )
+                    print(f"[DRY RUN] {sample_name} filter_collapse: {' '.join(map(sh_quote, cmd))}")
+                    rc = 0
+                    stdout_path = sample_logs_dir / f"{sample_name}.combine_filter.stdout.txt"
+                    stderr_path = sample_logs_dir / f"{sample_name}.combine_filter.stderr.txt"
+                    cmd_str = " ".join(map(sh_quote, cmd))
+                else:
+                    concatenate_tsvs(annotated_inputs, combined_annotated)
+                    rc, stdout_path, stderr_path, cmd_str = run_command(
+                        cmd=cmd,
+                        workdir=logs_root,
+                        logs_dir=sample_logs_dir,
+                        stage="combine_filter",
+                        sample_name=sample_name,
+                    )
+
+                all_results.append(
+                    StageResult(stage, sample_dir, rc == 0, stdout_path, stderr_path, rc, cmd_str, combined_filtered)
+                )
+                if rc != 0 and not args.continue_on_error:
+                    raise RuntimeError(f"combined filter_collapse failed (rc={rc})")
+                if rc != 0:
+                    combined_filtered = None
+            except Exception as ex:
+                had_exceptions = True
+                combined_filtered = None
+                eprint(f"[ERROR] {sample_name} {stage}: {ex}")
+                if not args.continue_on_error:
+                    raise
+            finally:
+                pbar.update(1)
 
         if "cluster" in global_stages:
             stage = "cluster"
@@ -552,18 +658,22 @@ def main() -> None:
             pbar.set_postfix_str(stage)
 
             try:
-                filtered_inputs = list(produced_filtered_by_sample.values())
-                if not filtered_inputs:
-                    raise RuntimeError("No filtered TSVs were produced; cannot run global clustering.")
-
-                combined_filtered = logs_root / f"combined_filtered_{now_stamp()}.tsv"
-                if args.dry_run:
-                    print(
-                        f"[DRY RUN] {sample_name} concatenate: "
-                        f"{len(filtered_inputs)} TSVs -> {combined_filtered}"
-                    )
+                if combine_before_filter:
+                    if combined_filtered is None:
+                        raise RuntimeError("No combined filtered TSV was produced; cannot run global clustering.")
                 else:
-                    concatenate_tsvs(filtered_inputs, combined_filtered)
+                    filtered_inputs = list(produced_filtered_by_sample.values())
+                    if not filtered_inputs:
+                        raise RuntimeError("No filtered TSVs were produced; cannot run global clustering.")
+
+                    combined_filtered = logs_root / f"combined_filtered_{now_stamp()}.tsv"
+                    if args.dry_run:
+                        print(
+                            f"[DRY RUN] {sample_name} concatenate: "
+                            f"{len(filtered_inputs)} TSVs -> {combined_filtered}"
+                        )
+                    else:
+                        concatenate_tsvs(filtered_inputs, combined_filtered)
 
                 cluster_args = get_stage_args(cfg, "cluster")
                 cmd = [sys.executable, str(scripts["cluster"]), str(combined_filtered)] + cluster_args
@@ -586,7 +696,7 @@ def main() -> None:
                 if rc == 0:
                     # gupta_cluster.py writes <input>_clustered.tsv
                     combined_clustered = combined_filtered.with_suffix("").with_name(combined_filtered.stem + "_clustered.tsv")
-                    if not combined_clustered.exists():
+                    if not args.dry_run and not combined_clustered.exists():
                         matches = sorted(logs_root.glob(combined_filtered.stem + "*_clustered.tsv"))
                         combined_clustered = matches[0] if matches else None
 
@@ -598,6 +708,7 @@ def main() -> None:
                     raise RuntimeError(f"cluster failed (rc={rc})")
 
             except Exception as ex:
+                had_exceptions = True
                 eprint(f"[ERROR] {sample_name} {stage}: {ex}")
                 if not args.continue_on_error:
                     raise
@@ -655,6 +766,7 @@ def main() -> None:
                     raise RuntimeError(f"make_searchable failed (rc={rc})")
 
             except Exception as ex:
+                had_exceptions = True
                 eprint(f"[ERROR] {sample_name} {stage}: {ex}")
                 if not args.continue_on_error:
                     raise
@@ -667,6 +779,8 @@ def main() -> None:
     # Summary
     ok = sum(1 for r in all_results if r.ok)
     bad = sum(1 for r in all_results if not r.ok)
+    if had_exceptions:
+        bad = max(bad, 1)
 
     summary_path = logs_root / f"summary_{now_stamp()}.tsv"
     with open(summary_path, "w") as f:
