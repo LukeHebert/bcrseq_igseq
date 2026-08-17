@@ -108,18 +108,6 @@ python workflows/igseq_proteomics/compare_cdr_lineage_abundance.py \
   --out-dir scratch/proteomics_example/04_cdr_comparison
 ```
 
-### CDR-derived lineage-abundance comparison
-
-`compare_cdr_lineage_abundance.py` compares five lineage-abundance selections from a mapped peptide TSV. A peptide must overlap a CDR by at least three amino acids by default; use `--min-cdr-overlap-aa` to change this threshold and `--top-n` to change the default top-10 comparison.
-
-- CDR1-only: overlaps CDR1 but not CDR2.
-- CDR2-only: overlaps CDR2 but not CDR1.
-- Combined CDR1/CDR2: the union of CDR1-only, CDR2-only, and peptides overlapping both regions.
-- CDR3: overlaps CDR3.
-- All peptides: every successfully mapped peptide.
-
-The script writes one five-selection lineage-abundance table, a seven-comparison summary, one lineage and top-N membership table per comparison, and a log-log scatterplot for comparisons with at least two lineages detected by both methods. It uses total precursor abundance and counts each `(ClusterID, peptide_sequence)` only once.
-
 ### In-silico protease digestion
 
 `simulate_protease_digestion.py` takes an AIRR/IgBLAST heavy-chain TSV with `fwr3_aa`, `cdr3_aa`, `fwr4_aa`, and positive integer `nt_seq_count` columns. It uses the bundled `workflows/igseq_proteomics/data/proteases.tsv` rule table unless `--protease-rules` is supplied.
