@@ -25,7 +25,7 @@ Then run scripts with the activated environment's `python`.
 | Workflow | Official entry files |
 | --- | --- |
 | BCR-seq Transcript Analysis | `workflows/bcrseq_transcript/bcrseq_pipeline.py`, `workflows/bcrseq_transcript/pipeline_config_template.json` |
-| Ig-seq Bottom-up Proteomic Analysis | `workflows/igseq_proteomics/filter_psms.py`, `workflows/igseq_proteomics/quantify_map_peptides.py`, `workflows/igseq_proteomics/plot_lineage_repertoire.py` |
+| Ig-seq Bottom-up Proteomic Analysis | `workflows/igseq_proteomics/filter_psms.py`, `workflows/igseq_proteomics/quantify_map_peptides.py`, `workflows/igseq_proteomics/plot_lineage_repertoire.py`, `workflows/igseq_proteomics/compare_cdr_lineage_abundance.py` |
 | Secondary analysis utilities | `analysis_utils/` |
 
 Repository layout:
@@ -74,9 +74,11 @@ flowchart TD
     E[BCRseq annotation TSV] --> D
     D --> F[Mapped quantified peptides]
     F --> G[workflows/igseq_proteomics/plot_lineage_repertoire.py]
+    F --> J[workflows/igseq_proteomics/compare_cdr_lineage_abundance.py]
     E --> G
     G --> H[Lineage abundance plots and TSVs]
     G --> I[Per-lineage logo and coverage plots with TSVs]
+    J --> K[CDR-derived lineage-abundance comparison TSVs and plots]
 ```
 
 Start here if you already have a Proteome Discoverer PSM export and a clustered BCRseq annotation TSV.
@@ -98,7 +100,23 @@ python workflows/igseq_proteomics/plot_lineage_repertoire.py \
   scratch/proteomics_example/02_mapped/demo_psms_filtered_heavy_single_lineage_mapped_peptides.tsv \
   examples/fixtures/proteomics/demo_bcrseq.tsv \
   --out-dir scratch/proteomics_example/03_plots
+
+python workflows/igseq_proteomics/compare_cdr_lineage_abundance.py \
+  scratch/proteomics_example/02_mapped/demo_psms_filtered_heavy_single_lineage_mapped_peptides.tsv \
+  --out-dir scratch/proteomics_example/04_cdr_comparison
 ```
+
+### CDR-derived lineage-abundance comparison
+
+`compare_cdr_lineage_abundance.py` compares five lineage-abundance selections from a mapped peptide TSV. A peptide must overlap a CDR by at least three amino acids by default; use `--min-cdr-overlap-aa` to change this threshold and `--top-n` to change the default top-10 comparison.
+
+- CDR1-only: overlaps CDR1 but not CDR2.
+- CDR2-only: overlaps CDR2 but not CDR1.
+- Combined CDR1/CDR2: the union of CDR1-only, CDR2-only, and peptides overlapping both regions.
+- CDR3: overlaps CDR3.
+- All peptides: every successfully mapped peptide.
+
+The script writes one five-selection lineage-abundance table, a seven-comparison summary, one lineage and top-N membership table per comparison, and a log-log scatterplot for comparisons with at least two lineages detected by both methods. It uses total precursor abundance and counts each `(ClusterID, peptide_sequence)` only once.
 
 ## Examples and fixtures
 

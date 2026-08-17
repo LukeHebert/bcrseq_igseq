@@ -44,4 +44,10 @@ python workflows/igseq_proteomics/plot_lineage_repertoire.py \
   scratch/proteomics_example/02_mapped/demo_psms_filtered_heavy_single_lineage_mapped_peptides.tsv \
   examples/fixtures/proteomics/demo_bcrseq.tsv \
   --out-dir scratch/proteomics_example/03_plots
+
+python workflows/igseq_proteomics/compare_cdr_lineage_abundance.py \
+  scratch/proteomics_example/02_mapped/demo_psms_filtered_heavy_single_lineage_mapped_peptides.tsv \
+  --out-dir scratch/proteomics_example/04_cdr_comparison
 ```
+
+The final command compares CDR1-only, CDR2-only, combined CDR1/CDR2, CDR3, and all-peptide lineage estimates. By default, it requires at least three amino acids of CDR overlap and compares the top 10 lineages for each method. It writes separate abundance, comparison, top-lineage membership, and available scatterplot outputs under `04_cdr_comparison`.
