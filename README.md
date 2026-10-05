@@ -39,15 +39,15 @@ Repository layout:
 
 ```mermaid
 flowchart TD
-    A[Sample FASTQ files] --> B[workflows/bcrseq_transcript/trim_merge.py]
+    A[Sample FASTQ files] --> B[trim_merge.py]
     B --> C[Trimmed and merged reads]
-    C --> D[workflows/bcrseq_transcript/identify_genes.py]
+    C --> D[identify_genes.py]
     D --> E[IgBLAST-annotated BCRseq TSV]
-    E --> F[workflows/bcrseq_transcript/filter_collapse.py]
+    E --> F[filter_collapse.py]
     F --> G[Filtered collapsed BCRseq records]
-    G --> H[workflows/bcrseq_transcript/gupta_cluster.py]
+    G --> H[gupta_cluster.py]
     H --> I[Clustered BCRseq annotation TSV]
-    I --> J[workflows/bcrseq_transcript/make_searchable.py]
+    I --> J[make_searchable.py]
     J --> K[Complementary searchable FASTA database]
 ```
 
