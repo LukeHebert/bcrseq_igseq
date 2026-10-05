@@ -68,18 +68,18 @@ This bundled transcript example is a dry-run wiring check. It demonstrates sampl
 
 ```mermaid
 flowchart TD
-    A[Proteome Discoverer PSM export] --> B[workflows/igseq_proteomics/filter_psms.py]
+    A[Proteome Discoverer PSM export] --> B[filter_psms.py]
     B --> C[Heavy-chain single-lineage PSMs]
-    C --> D[workflows/igseq_proteomics/quantify_map_peptides.py]
+    C --> D[quantify_map_peptides.py]
     E[BCRseq annotation TSV] --> D
     D --> F[Mapped quantified peptides]
-    F --> G[workflows/igseq_proteomics/plot_lineage_repertoire.py]
-    F --> J[workflows/igseq_proteomics/compare_cdr_lineage_abundance.py]
+    F --> G[plot_lineage_repertoire.py]
+    F --> J[compare_cdr_lineage_abundance.py]
     E --> G
     G --> H[Lineage abundance plots and TSVs]
     G --> I[Per-lineage logo and coverage plots with TSVs]
     J --> K[CDR-derived lineage-abundance comparison TSVs and plots]
-    E --> L[workflows/igseq_proteomics/simulate_protease_digestion.py]
+    E --> L[simulate_protease_digestion.py]
     L --> M[Protease-selection TSVs and CDR3 digestion plots]
 ```
 
